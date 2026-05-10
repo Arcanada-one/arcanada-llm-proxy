@@ -40,16 +40,18 @@ jobs:
     concurrency:
       group: deploy-arcanada-llm-proxy
       cancel-in-progress: false
-    env:
-      LLM_PROXY_SHARED_SECRET: ${{ secrets.LLM_PROXY_SHARED_SECRET }}
-      MC_API_KEY: ${{ secrets.MC_API_KEY }}
-      MC_BASE_URL: http://host.docker.internal:3900
-      LANGFUSE_OTLP_ENDPOINT: ${{ secrets.LANGFUSE_OTLP_ENDPOINT }}
-      LANGFUSE_OTLP_HEADERS: ${{ secrets.LANGFUSE_OTLP_HEADERS }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Pull canonical deploy tree
+        run: |
+          set -euo pipefail
+          # Canonical deploy tree on arcana-prod. Operator-provisioned .env lives
+          # there (shared_secret, MC_API_KEY); never overwritten by CI.
+          cd /opt/arcanada-llm-proxy/code
+          git fetch --quiet origin main
+          git reset --hard origin/main
       - name: Up container
-        run: docker compose -f docker-compose.yml up -d --build
+        working-directory: /opt/arcanada-llm-proxy/code
+        run: docker compose --env-file .env -f docker-compose.yml up -d --build
       - name: Wait for health
         run: |
           for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -60,8 +62,10 @@ jobs:
             sleep 3
           done
           echo "health check failed"
-          curl -X POST https://ops.arcanada.one/events \
-            -H "Authorization: Bearer ${{ secrets.OPS_BOT_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{"agent":"github-actions","title":"arcanada-llm-proxy deploy failed","body":"health check did not pass after 30s","dedup_key":"deploy-arcanada-llm-proxy-${{ github.sha }}","category":"fatal","meta":{"service":"arcanada-llm-proxy","sha":"${{ github.sha }}"}}' || true
+          if [ -n "${{ secrets.OPSBOT_API_KEY }}" ]; then
+            curl -X POST https://ops.arcanada.one/events \
+              -H "Authorization: Bearer ${{ secrets.OPSBOT_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d '{"agent":"github-actions","title":"arcanada-llm-proxy deploy failed","body":"health check did not pass after 30s","dedup_key":"deploy-arcanada-llm-proxy-${{ github.sha }}","category":"fatal","meta":{"service":"arcanada-llm-proxy","sha":"${{ github.sha }}"}}' || true
+          fi
           exit 1
