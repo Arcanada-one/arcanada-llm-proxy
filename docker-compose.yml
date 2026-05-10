@@ -1,0 +1,22 @@
+services:
+  proxy:
+    build: .
+    container_name: arcanada-llm-proxy
+    restart: unless-stopped
+    ports:
+      # Tier 1 — loopback only per CLAUDE.md § Network Exposure Baseline.
+      # Tailscale CGNAT (Tier 2) reachability comes via host network — no extra bind.
+      - "127.0.0.1:4000:4000"
+    environment:
+      LLM_PROXY_SHARED_SECRET: ${LLM_PROXY_SHARED_SECRET}
+      MC_BASE_URL: ${MC_BASE_URL:-http://host.docker.internal:3900}
+      MC_API_KEY: ${MC_API_KEY}
+      LANGFUSE_OTLP_ENDPOINT: ${LANGFUSE_OTLP_ENDPOINT:-}
+      LANGFUSE_OTLP_HEADERS: ${LANGFUSE_OTLP_HEADERS:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

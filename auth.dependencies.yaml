@@ -1,0 +1,19 @@
+# Auth Arcana dependency declaration (CLAUDE.md § Auth Arcana Mandate)
+# Required by Auth Arcana CI gate (creative-AUTH-0003-dependency-graph.md).
+
+service: arcanada-llm-proxy
+auth_arcana_min_version: "0.1.0"
+last_validated: "2026-05-10"
+
+# Auth Arcana scopes consumed by this service when calling other ecosystem APIs.
+scopes_consumed:
+  - mc:execute  # POST /connectors/{name}/execute on Model Connector :3900
+
+# Auth Arcana scopes provided by this service to its callers.
+# Currently bearer-token-only (Vault-managed shared_secret); Auth Arcana service-account
+# flow integration deferred until AUTH-0070+.
+scopes_provided: []
+
+# Notes
+# - Bearer token validation: static compare against Vault `arcanada/prod/env/llm-proxy.shared_secret`.
+# - When AUTH-0070+ ships, migrate to Auth Arcana service-account JWT verification via JWKS.

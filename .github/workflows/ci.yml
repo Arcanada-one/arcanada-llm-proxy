@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check app/ tests/
+      - run: pytest --cov=app --cov-report=term
+      - run: pip-audit --strict -r requirements.txt
+
+  network-exposure:
+    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@main
+    with:
+      compose-paths: 'docker-compose.yml'
+
+  build:
+    needs: [lint-test, network-exposure]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, arcana-prod, docker]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t arcanada-llm-proxy:${{ github.sha }} .
+
+  deploy:
+    needs: [build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, arcana-prod, docker]
+    concurrency:
+      group: deploy-arcanada-llm-proxy
+      cancel-in-progress: false
+    env:
+      LLM_PROXY_SHARED_SECRET: ${{ secrets.LLM_PROXY_SHARED_SECRET }}
+      MC_API_KEY: ${{ secrets.MC_API_KEY }}
+      MC_BASE_URL: http://host.docker.internal:3900
+      LANGFUSE_OTLP_ENDPOINT: ${{ secrets.LANGFUSE_OTLP_ENDPOINT }}
+      LANGFUSE_OTLP_HEADERS: ${{ secrets.LANGFUSE_OTLP_HEADERS }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Up container
+        run: docker compose -f docker-compose.yml up -d --build
+      - name: Wait for health
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
+              echo "healthy"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "health check failed"
+          curl -X POST https://ops.arcanada.one/events \
+            -H "Authorization: Bearer ${{ secrets.OPS_BOT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"agent":"github-actions","title":"arcanada-llm-proxy deploy failed","body":"health check did not pass after 30s","dedup_key":"deploy-arcanada-llm-proxy-${{ github.sha }}","category":"fatal","meta":{"service":"arcanada-llm-proxy","sha":"${{ github.sha }}"}}' || true
+          exit 1
