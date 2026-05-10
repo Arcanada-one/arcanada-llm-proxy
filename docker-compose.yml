@@ -9,14 +9,23 @@ services:
       - "127.0.0.1:4000:4000"
     environment:
       LLM_PROXY_SHARED_SECRET: ${LLM_PROXY_SHARED_SECRET}
-      MC_BASE_URL: ${MC_BASE_URL:-http://host.docker.internal:3900}
+      # Default points at the Model Connector container on its own bridge
+      # network (joined via networks: model-connector below).
+      MC_BASE_URL: ${MC_BASE_URL:-http://model-connector-model-connector-1:3900}
       MC_API_KEY: ${MC_API_KEY}
       LANGFUSE_OTLP_ENDPOINT: ${LANGFUSE_OTLP_ENDPOINT:-}
       LANGFUSE_OTLP_HEADERS: ${LANGFUSE_OTLP_HEADERS:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - model-connector
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+networks:
+  default:
+  model-connector:
+    name: model-connector_default
+    external: true
