@@ -4,10 +4,14 @@ Canonical endpoint: ${LANGFUSE_HOST}/api/public/otel/v1/traces (env LANGFUSE_OTL
 Span name: llm-proxy-request. Attributes match PRD-CONN-0045 §"Observability":
 input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens,
 route_taken, fallback_reason.
+
+Also hosts SecretRedactor — defensive logging filter that strips bearer tokens
+and an explicit shared_secret substring before any handler emits the record.
 """
 
 import logging
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -20,6 +24,50 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 log = logging.getLogger("proxy.otel")
 
 _initialised = False
+
+_BEARER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)(authorization:\s*bearer\s+)\S+"), r"\1***REDACTED***"),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9_\-\.=]{8,}"), r"\1***REDACTED***"),
+)
+_MIN_SECRET_LEN = 8
+
+
+class SecretRedactor(logging.Filter):
+    """Strip bearer tokens + caller-supplied secret substrings from log records."""
+
+    def __init__(self, extra_secrets: list[str] | None = None) -> None:
+        super().__init__()
+        self._extras = [s for s in (extra_secrets or []) if s and len(s) >= _MIN_SECRET_LEN]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        redacted = msg
+        for pat, repl in _BEARER_PATTERNS:
+            redacted = pat.sub(repl, redacted)
+        for extra in self._extras:
+            redacted = redacted.replace(extra, "***REDACTED***")
+        if redacted != msg:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def install_log_redaction(extra_secrets: list[str] | None = None) -> SecretRedactor:
+    """Attach SecretRedactor to root logger + every existing handler.
+
+    Filters on a Logger fire only for records originating from that logger;
+    handler-level filters fire for every record an ancestor logger forwards
+    to that handler — so we install on both for defence-in-depth.
+    """
+    f = SecretRedactor(extra_secrets=extra_secrets)
+    root = logging.getLogger()
+    root.addFilter(f)
+    for h in root.handlers:
+        h.addFilter(f)
+    return f
 
 
 def init_tracing(service_name: str = "arcanada-llm-proxy") -> None:

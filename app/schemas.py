@@ -80,7 +80,7 @@ class MCResponse(BaseModel):
     model: str | None = None
     result: str = ""
     structured: Any | None = None
-    usage: MCUsage = MCUsage()
+    usage: MCUsage = Field(default_factory=MCUsage)
     latencyMs: int = 0
     queueWaitMs: int = 0
     status: Literal["success", "error"]

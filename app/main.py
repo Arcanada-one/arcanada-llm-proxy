@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 
 from .auth import require_bearer, set_shared_secret
 from .mc_client import MCClient
-from .observability import init_tracing, request_span
+from .observability import init_tracing, install_log_redaction, request_span
 from .router import route
 from .schemas import (
     ChatCompletionChoice,
@@ -42,7 +42,9 @@ mc_client = MCClient()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    set_shared_secret(load_shared_secret())
+    secret = load_shared_secret()
+    set_shared_secret(secret)
+    install_log_redaction(extra_secrets=[secret])
     init_tracing()
     log.info("arcanada-llm-proxy %s ready", VERSION)
     try:

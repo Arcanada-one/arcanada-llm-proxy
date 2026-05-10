@@ -127,3 +127,23 @@ async def test_401_becomes_auth_error(client):
     assert r.error.type == "auth_error"
     assert r.error.retryable is False
     await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_5xx_unparseable_body_logs_warning(client, caplog):
+    """MC contract drift visibility — 5xx with non-JSON body must log a warning
+    so the synthetic upstream_5xx fallback does not silently mask schema breaks."""
+    respx.post("http://mc.test:3900/connectors/codex/execute").mock(
+        return_value=Response(503, text="<html>upstream gateway error</html>")
+    )
+    req = MCExecuteRequest(prompt="ping")
+    with caplog.at_level("WARNING", logger="proxy.mc"):
+        r = await client.execute("codex", req)
+    assert r.status == "error"
+    assert r.error is not None
+    assert r.error.type == "upstream_5xx"
+    assert any(
+        "5xx body parse failed" in rec.getMessage() for rec in caplog.records
+    ), f"expected 'mc 5xx body parse failed' warning; got {[r.getMessage() for r in caplog.records]}"
+    await client.aclose()

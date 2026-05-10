@@ -54,8 +54,11 @@ class MCClient:
                 parsed = MCResponse.model_validate(r.json())
                 if parsed.status == "error":
                     return parsed
-            except Exception:
-                pass
+            except Exception as parse_exc:
+                log.warning(
+                    "mc 5xx body parse failed connector=%s status=%d: %s",
+                    connector, r.status_code, parse_exc,
+                )
             if r.status_code in (401, 403):
                 return _synthetic_error("auth_error", f"MC returned {r.status_code}", retryable=False)
             if r.status_code == 429:
