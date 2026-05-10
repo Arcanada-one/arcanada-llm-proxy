@@ -103,7 +103,7 @@ async def _execute_with_fallback(
     fallback_reason: FallbackReason = "none"
     if response.status == "error" and connector == "codex":
         err_type = response.error.type if response.error else ""
-        if err_type in ("rate_limited", "auth_error", "execution_error"):
+        if err_type in ("rate_limited", "auth_error", "execution_error", "circuit_open", "queue_timeout", "upstream_5xx"):
             log.warning("codex %s — falling back to openrouter", err_type)
             # On fallback we drop the strict-mode json_schema contract: OpenRouter
             # without a schema-aware system prompt cannot guarantee a JSON object,
@@ -113,6 +113,9 @@ async def _execute_with_fallback(
             payload = payload.model_copy(update={"jsonSchema": None, "model": None, "responseFormat": None})
             response = await mc_client.execute("openrouter", payload)
             fallback_reason = "429" if err_type == "rate_limited" else "auth_error"
+            # circuit_open / queue_timeout fold into "auth_error" surfacing — the
+            # client only needs to know "structured-output guarantee was not met".
+            # Future enrichment: add explicit fallback_reason values per err_type.
             connector = "openrouter"
 
     return response, connector, fallback_reason

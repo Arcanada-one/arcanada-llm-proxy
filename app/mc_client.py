@@ -45,11 +45,23 @@ class MCClient:
             log.warning("mc network error connector=%s: %s", connector, exc)
             return _synthetic_error("network_error", str(exc), retryable=True)
 
-        if r.status_code in (401, 403):
-            return _synthetic_error("auth_error", f"MC returned {r.status_code}", retryable=False)
-        if r.status_code == 429:
-            return _synthetic_error("rate_limited", "MC returned 429", retryable=True)
-        if r.status_code >= 400:
+        # MC returns structured ConnectorResponse on retryable failures with HTTP
+        # 5xx (circuit_open, auth_error, queue_timeout) or 429 (rate_limited).
+        # Try to parse the body before falling back to synthetic shapes — the
+        # body's error.type carries finer-grained recovery hints.
+        if r.status_code >= 400 and r.status_code < 600:
+            try:
+                parsed = MCResponse.model_validate(r.json())
+                if parsed.status == "error":
+                    return parsed
+            except Exception:
+                pass
+            if r.status_code in (401, 403):
+                return _synthetic_error("auth_error", f"MC returned {r.status_code}", retryable=False)
+            if r.status_code == 429:
+                return _synthetic_error("rate_limited", "MC returned 429", retryable=True)
+            if r.status_code >= 500:
+                return _synthetic_error("upstream_5xx", r.text[:500], retryable=True)
             return _synthetic_error("validation_error", r.text[:500], retryable=False)
 
         try:
