@@ -23,7 +23,7 @@ jobs:
   network-exposure:
     uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@main
     with:
-      compose-paths: 'docker-compose.yml'
+      compose_paths: 'docker-compose.yml'
 
   build:
     needs: [lint-test, network-exposure]
