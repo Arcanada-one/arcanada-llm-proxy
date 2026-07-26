@@ -171,18 +171,37 @@ def run_runner_process_gate(
     parser_text: str | None = None,
     gate_text: str | None = None,
     collector_text: str | None = None,
+    capture_text: str | None = None,
+    snapshots: tuple[str, str] | None = None,
+    second_snapshot_status: int = 0,
 ) -> subprocess.CompletedProcess[str]:
     cgroup_root = cgroup_root or proc_root.parent / "cgroup"
     cgroup_root.mkdir(parents=True, exist_ok=True)
     if pids is not None:
         write_cgroup_processes(cgroup_root, control_group, pids)
+    snapshot_counter = proc_root.parent / "snapshot-counter"
+    snapshot_counter.write_text("0")
+    if snapshots is not None:
+        capture_text = """capture_runner_cgroup_snapshot() {
+  local count
+  count="$(cat "$MOCK_SNAPSHOT_COUNTER")"
+  if [ "$count" = 0 ]; then
+    printf '1\n' >"$MOCK_SNAPSHOT_COUNTER"
+    printf '%s\n' "$MOCK_FIRST_SNAPSHOT"
+    return 0
+  fi
+  printf '%s\n' "$MOCK_SECOND_SNAPSHOT"
+  return "$MOCK_SECOND_SNAPSHOT_STATUS"
+}"""
     functions = "\n".join(
         (
             parser_text or installer_function("process_has_group"),
             installer_function("require_runner_account_dockerless"),
             installer_function("require_runner_main_pid"),
             installer_function("require_runner_control_group"),
-            collector_text or installer_function("collect_runner_cgroup_pids"),
+            collector_text
+            or installer_function("collect_runner_cgroup_snapshot_records"),
+            capture_text or installer_function("capture_runner_cgroup_snapshot"),
             gate_text or installer_function("require_runner_processes_dockerless"),
         )
     )
@@ -221,6 +240,10 @@ pgrep() {
             "MOCK_CONTROL_GROUP_STATUS": str(control_group_status),
             "MOCK_PGREP_PIDS": pgrep_pids if pgrep_pids is not None else (pids or ""),
             "MOCK_PGREP_STATUS": str(pgrep_status),
+            "MOCK_SNAPSHOT_COUNTER": str(snapshot_counter),
+            "MOCK_FIRST_SNAPSHOT": snapshots[0] if snapshots is not None else "",
+            "MOCK_SECOND_SNAPSHOT": snapshots[1] if snapshots is not None else "",
+            "MOCK_SECOND_SNAPSHOT_STATUS": str(second_snapshot_status),
         },
     )
 
@@ -495,9 +518,14 @@ def test_installer_process_gate_has_no_conditional_silent_skip() -> None:
         'control_group="$(require_runner_control_group "$runner_unit")"' in text
     )
     assert (
-        'runner_pid_output="$(collect_runner_cgroup_pids "$cgroup_path")"'
+        'first_snapshot="$(capture_runner_cgroup_snapshot "$cgroup_path")"'
         in text
     )
+    assert (
+        'second_snapshot="$(capture_runner_cgroup_snapshot "$cgroup_path")"'
+        in text
+    )
+    assert 'if [ "$first_snapshot" != "$second_snapshot" ]; then' in text
     assert "pgrep" not in text
     assert (
         'require_runner_processes_dockerless "$docker_gid" /proc /sys/fs/cgroup'
@@ -592,7 +620,7 @@ def test_installer_runner_process_gate_requires_exact_systemd_control_group(
             control_group=control_group,
             control_group_status=status,
         )
-        assert result.returncode == 1, (control_group, status, result)
+        assert result.returncode == 2, (control_group, status, result)
 
 
 def test_installer_runner_process_gate_fails_closed_on_enumeration_drift(
@@ -614,7 +642,7 @@ def test_installer_runner_process_gate_fails_closed_on_enumeration_drift(
             main_pid=main_pid,
             pids=pids,
         )
-        assert result.returncode == 1, (name, result)
+        assert result.returncode == 2, (name, result)
 
     missing_cgroup = run_runner_process_gate(
         proc_root,
@@ -623,13 +651,13 @@ def test_installer_runner_process_gate_fails_closed_on_enumeration_drift(
         pids=None,
         cgroup_root=tmp_path / "missing-cgroup",
     )
-    assert missing_cgroup.returncode == 1
+    assert missing_cgroup.returncode == 2
     assert "cgroup enumeration failed" in missing_cgroup.stderr
 
     vanished_child = run_runner_process_gate(
         proc_root, "988", main_pid="2001", pids="2001\n2999\n"
     )
-    assert vanished_child.returncode == 1
+    assert vanished_child.returncode == 2
     assert "process groups are unreadable" in vanished_child.stderr
 
     unreadable_status = proc_root / "2003" / "status"
@@ -637,7 +665,7 @@ def test_installer_runner_process_gate_fails_closed_on_enumeration_drift(
     unreadable_child = run_runner_process_gate(
         proc_root, "988", main_pid="2001", pids="2001\n2003\n"
     )
-    assert unreadable_child.returncode == 1
+    assert unreadable_child.returncode == 2
     assert "process groups are unreadable" in unreadable_child.stderr
 
 
@@ -661,7 +689,7 @@ def test_installer_runner_process_gate_rejects_symlink_or_incomplete_cgroup_tree
         pids=None,
         cgroup_root=linked_root,
     )
-    assert linked_root_result.returncode == 1
+    assert linked_root_result.returncode == 2
     assert "cgroup root is invalid" in linked_root_result.stderr
 
     linked_service_root = tmp_path / "linked-service-root"
@@ -679,7 +707,7 @@ def test_installer_runner_process_gate_rejects_symlink_or_incomplete_cgroup_tree
         pids=None,
         cgroup_root=linked_service_root,
     )
-    assert linked_service.returncode == 1
+    assert linked_service.returncode == 2
     assert "cgroup enumeration failed" in linked_service.stderr
 
     linked_procs_root = tmp_path / "linked-procs-root"
@@ -695,7 +723,7 @@ def test_installer_runner_process_gate_rejects_symlink_or_incomplete_cgroup_tree
         pids=None,
         cgroup_root=linked_procs_root,
     )
-    assert linked_procs.returncode == 1
+    assert linked_procs.returncode == 2
     assert "cgroup enumeration failed" in linked_procs.stderr
 
     incomplete_nested_root = tmp_path / "incomplete-nested-root"
@@ -712,8 +740,85 @@ def test_installer_runner_process_gate_rejects_symlink_or_incomplete_cgroup_tree
         pids=None,
         cgroup_root=incomplete_nested_root,
     )
-    assert incomplete_nested.returncode == 1
+    assert incomplete_nested.returncode == 2
     assert "cgroup enumeration failed" in incomplete_nested.stderr
+
+
+def test_installer_runner_process_gate_rejects_snapshot_races_and_vanished_entry(
+    tmp_path: pathlib.Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    write_process_status(proc_root, "2001", "1000 1001")
+    write_process_status(proc_root, "2002", "1000 1001")
+    stable = "F|cgroup.procs\nP|cgroup.procs|2001"
+    changed_snapshots = (
+        stable + "\nP|cgroup.procs|2002",
+        (
+            "F|cgroup.procs\n"
+            "F|worker/cgroup.procs\n"
+            "P|cgroup.procs|2001\n"
+            "P|worker/cgroup.procs|2002"
+        ),
+        "F|cgroup.procs\nP|cgroup.procs|2002",
+    )
+    for second_snapshot in changed_snapshots:
+        result = run_runner_process_gate(
+            proc_root,
+            "988",
+            main_pid="2001",
+            pids=None,
+            snapshots=(stable, second_snapshot),
+        )
+        assert result.returncode == 2, (second_snapshot, result)
+        assert "cgroup changed during preflight" in result.stderr
+
+    vanished_entry = run_runner_process_gate(
+        proc_root,
+        "988",
+        main_pid="2001",
+        pids=None,
+        snapshots=(stable, stable),
+        second_snapshot_status=1,
+    )
+    assert vanished_entry.returncode == 2
+    assert "cgroup recheck failed" in vanished_entry.stderr
+
+
+def test_installer_runner_process_gate_validates_all_statuses_before_retained_result(
+    tmp_path: pathlib.Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    write_process_status(proc_root, "2001", "1000 988 1001")
+    snapshot = (
+        "F|cgroup.procs\n"
+        "P|cgroup.procs|2001\n"
+        "P|cgroup.procs|2002"
+    )
+    result = run_runner_process_gate(
+        proc_root,
+        "988",
+        main_pid="2001",
+        pids=None,
+        snapshots=(snapshot, snapshot),
+    )
+    assert result.returncode == 2
+    assert "process groups are unreadable" in result.stderr
+
+    source = installer_function("require_runner_processes_dockerless")
+    early_return_mutant = source.replace(
+        "        retained_group_seen=1",
+        "        return 1",
+    )
+    assert early_return_mutant != source
+    mutant = run_runner_process_gate(
+        proc_root,
+        "988",
+        main_pid="2001",
+        pids=None,
+        snapshots=(snapshot, snapshot),
+        gate_text=early_return_mutant,
+    )
+    assert mutant.returncode == 1
 
 
 def test_installer_runner_process_gate_kills_main_child_and_pgrep_bypass_mutants(
@@ -730,24 +835,22 @@ def test_installer_runner_process_gate_kills_main_child_and_pgrep_bypass_mutants
     source = installer_function("require_runner_processes_dockerless")
     main_presence_check = """    if [ "$main_pid_seen" -ne 1 ]; then
       printf 'install-llm-proxy-deploy: runner MainPID vanished during preflight\\n' >&2
-      return 1
+      return 2
     fi
 """
     missing_main_mutant = source.replace(main_presence_check, "")
-    main_only_mutant = source.replace(
-        'for runner_pid in "${runner_pids[@]}"; do',
-        'for runner_pid in "$main_pid"; do',
-    )
-    pgrep_mutant = source.replace(
-        'runner_pid_output="$(collect_runner_cgroup_pids "$cgroup_path")"',
-        'runner_pid_output="$(pgrep -u "$runner_user")"',
-    )
-    collector = installer_function("collect_runner_cgroup_pids")
-    recursive_call = '      collect_runner_cgroup_pids "$entry" || return 1'
+    pgrep_capture_mutant = """capture_runner_cgroup_snapshot() {
+  local pid
+  printf '%s\n' 'F|cgroup.procs'
+  while IFS= read -r pid; do
+    printf 'P|cgroup.procs|%s\n' "$pid"
+  done < <(pgrep -u ci-runner-ci)
+}"""
+    collector = installer_function("collect_runner_cgroup_snapshot_records")
+    recursive_call = """      collect_runner_cgroup_snapshot_records \\
+        "$entry" "$snapshot_root" || return 1"""
     root_only_collector_mutant = collector.replace(recursive_call, "      :")
     assert missing_main_mutant != source
-    assert main_only_mutant != source
-    assert pgrep_mutant != source
     assert root_only_collector_mutant != collector
 
     missing_main = run_runner_process_gate(
@@ -760,15 +863,6 @@ def test_installer_runner_process_gate_kills_main_child_and_pgrep_bypass_mutants
     assert missing_main.returncode == 0
     write_cgroup_processes(cgroup_root, control_group, "2002\n", child="worker")
     (proc_root / "2002" / "status").write_text("Name:\trunner\nGroups:\t1000 988 1001\n")
-    main_only = run_runner_process_gate(
-        proc_root,
-        "988",
-        main_pid="2001",
-        pids="2001\n",
-        cgroup_root=cgroup_root,
-        gate_text=main_only_mutant,
-    )
-    assert main_only.returncode == 0
 
     root_only = run_runner_process_gate(
         proc_root,
@@ -786,10 +880,10 @@ def test_installer_runner_process_gate_kills_main_child_and_pgrep_bypass_mutants
         main_pid="2001",
         pids="2001\n",
         pgrep_pids="2001\n2999\n",
-        gate_text=pgrep_mutant,
+        capture_text=pgrep_capture_mutant,
     )
     assert pgrep.returncode == 1
-    assert "service retained Docker group" in pgrep.stderr
+    assert "runner service retained Docker group" in pgrep.stderr
 
 
 def test_installer_runner_process_gate_rejects_invalid_docker_gid_and_mutant(
@@ -801,7 +895,7 @@ def test_installer_runner_process_gate_rejects_invalid_docker_gid_and_mutant(
         result = run_runner_process_gate(
             proc_root, docker_gid, main_pid="2001", pids="2001\n"
         )
-        assert result.returncode == 1, (docker_gid, result)
+        assert result.returncode == 2, (docker_gid, result)
 
     parser = installer_function("process_has_group")
     parser_mutant = parser.replace(
@@ -810,7 +904,7 @@ def test_installer_runner_process_gate_rejects_invalid_docker_gid_and_mutant(
     gate = installer_function("require_runner_processes_dockerless")
     gid_check = """  if [[ ! "$docker_gid" =~ ^[1-9][0-9]*$ ]]; then
     printf 'install-llm-proxy-deploy: Docker group GID is invalid\\n' >&2
-    return 1
+    return 2
   fi
 """
     gate_mutant = gate.replace(gid_check, "")
