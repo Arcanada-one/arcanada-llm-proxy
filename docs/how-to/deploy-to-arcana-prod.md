@@ -22,21 +22,55 @@ dispatching the Dockerless production workflow:
 1. stop routing production work to the legacy `ci-runner` identity;
 2. disable the global provisioner that recreates
    `/etc/sudoers.d/10-hermes-orch`;
-3. remove Docker-group membership from both runner identities and restart
+3. verify the root-owned rollback snapshot and byte-match its archived
+   `etc/sudoers.d/10-hermes-orch` member against the live file;
+4. remove the live legacy sudoers file as a host-migration action and validate
+   the complete sudo policy;
+5. remove Docker-group membership from both runner identities and restart
    every retained runner process;
-4. run this installer and require its account, filesystem, socket, process,
+6. run this installer and require its account, filesystem, socket, process,
    and effective-sudo checks to pass;
-5. only then enable the `arcana-prod-ci` runner for gated cutovers.
+7. only then enable the `arcana-prod-ci` runner for gated cutovers.
+
+For the SUP-0016 migration, the verified rollback artifact is
+`/root/SUP-0016-runner-evacuation-prestate.Mh5MJaqY`. It must remain owned by
+root with mode 0700; its `SHA256SUMS` and payloads must remain mode 0600. Run
+these gates before removing the live rule:
+
+```bash
+snapshot=/root/SUP-0016-runner-evacuation-prestate.Mh5MJaqY
+sudo test "$(stat -c '%U:%G %a' "${snapshot}")" = "root:root 700"
+sudo test "$(stat -c '%U:%G %a' "${snapshot}/SHA256SUMS")" = "root:root 600"
+sudo sha256sum -c "${snapshot}/SHA256SUMS"
+sudo tar -tzf "${snapshot}/privilege-surfaces.tar.gz" |
+  grep -Fx 'etc/sudoers.d/10-hermes-orch'
+sudo bash -eu -o pipefail -c \
+  'tar -xOf "$1" etc/sudoers.d/10-hermes-orch | cmp --silent - "$2"' \
+  _ "${snapshot}/privilege-surfaces.tar.gz" \
+  /etc/sudoers.d/10-hermes-orch
+sudo visudo -c
+sudo rm -- /etc/sudoers.d/10-hermes-orch
+sudo visudo -c
+sudo test ! -e /etc/sudoers.d/10-hermes-orch
+sudo test ! -L /etc/sudoers.d/10-hermes-orch
+```
+
+If the host migration must be rolled back, stop both runner services first,
+extract only `etc/sudoers.d/10-hermes-orch` from the verified
+`privilege-surfaces.tar.gz` into a root-owned temporary file, require
+`visudo -cf` on that file, then atomically install it as root:root mode 0440
+and run `visudo -c` again. Never restore the broad rule while either runner
+is live.
 
 The installer idempotently changes `/opt/arcanada-llm-proxy/code` to a
 root-only deploy tree and makes
 `/opt/arcanada-llm-proxy/code/.env` root-only mode 0600 when those legacy
 paths exist. It verifies that neither runner can read, write, or traverse
-them. It also moves the known broad
-`/etc/sudoers.d/10-hermes-orch` rule to the root-only rollback artifact
-`/var/lib/arcanada-llm-proxy-deploy/disabled-sudoers/10-hermes-orch`, installs
-only the `ci-runner-ci` broker rule, and audits the effective sudo policy for
-both identities. Any remaining wildcard service control fails the install.
+them. The installer never removes or archives this global sudoers file; it
+fails closed unless the global runner migration has already removed it.
+It installs only the `ci-runner-ci` broker rule and audits the effective sudo
+policy for both identities. Any remaining wildcard service control fails the
+install.
 
 From an exact reviewed checkout, calculate the bundle identities and install
 the root-owned broker. The fourth argument is the SHA-256 hash of the exact

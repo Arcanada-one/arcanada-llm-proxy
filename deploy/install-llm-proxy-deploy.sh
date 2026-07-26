@@ -26,6 +26,19 @@ test "$(sha256sum "$helper" | cut -d' ' -f1)" = "$1"
 test "$(sha256sum "$service_unit" | cut -d' ' -f1)" = "$2"
 test "$(sha256sum "$timer_unit" | cut -d' ' -f1)" = "$3"
 
+require_legacy_sudoers_absent() {
+  local legacy_sudoers_path="$1"
+  if [ -e "$legacy_sudoers_path" ] || [ -L "$legacy_sudoers_path" ]; then
+    printf '%s\n' \
+      'install-llm-proxy-deploy: legacy sudoers must be removed by the global runner migration' \
+      >&2
+    return 1
+  fi
+}
+
+legacy_sudoers=/etc/sudoers.d/10-hermes-orch
+require_legacy_sudoers_absent "$legacy_sudoers"
+
 runner_users=(ci-runner ci-runner-ci)
 docker_gid="$(getent group docker | cut -d: -f3)"
 if ! id ci-runner-ci >/dev/null 2>&1; then
@@ -131,35 +144,6 @@ for runner_user in "${runner_users[@]}"; do
     fi
   done
 done
-
-legacy_sudoers=/etc/sudoers.d/10-hermes-orch
-legacy_sudoers_backup=\
-/var/lib/arcanada-llm-proxy-deploy/disabled-sudoers/10-hermes-orch
-if [ -e "$legacy_sudoers" ]; then
-  if [ -L "$legacy_sudoers" ] || [ ! -f "$legacy_sudoers" ] ||
-    [ "$(stat -c '%U:%G' "$legacy_sudoers")" != root:root ] ||
-    [ "$(stat -c '%a' "$legacy_sudoers")" != 440 ]; then
-    printf 'install-llm-proxy-deploy: legacy sudoers file is unsafe\n' >&2
-    exit 1
-  fi
-  if ! grep -Fqx \
-    'ci-runner ALL=(root) NOPASSWD: HERMES_SVC, HERMES_LOG' \
-    "$legacy_sudoers" ||
-    ! grep -Eq 'systemctl (start|stop|restart) \*' "$legacy_sudoers"; then
-    printf 'install-llm-proxy-deploy: legacy sudoers content is unexpected\n' >&2
-    exit 1
-  fi
-  install -d -o root -g root -m 0700 \
-    /var/lib/arcanada-llm-proxy-deploy/disabled-sudoers
-  if [ -e "$legacy_sudoers_backup" ] &&
-    ! cmp --silent "$legacy_sudoers" "$legacy_sudoers_backup"; then
-    printf 'install-llm-proxy-deploy: legacy sudoers backup conflicts\n' >&2
-    exit 1
-  fi
-  mv -f -- "$legacy_sudoers" "$legacy_sudoers_backup"
-  chown root:root "$legacy_sudoers_backup"
-  chmod 0600 "$legacy_sudoers_backup"
-fi
 
 helper_tmp="$(mktemp /usr/local/sbin/.arcanada-llm-proxy-deploy.XXXXXX)"
 service_tmp="$(mktemp /etc/systemd/system/.arcanada-llm-proxy-rollback.service.XXXXXX)"
