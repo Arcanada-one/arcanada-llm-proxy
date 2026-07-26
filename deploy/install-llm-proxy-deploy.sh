@@ -6,8 +6,9 @@ if [ "$(id -u)" -ne 0 ]; then
   printf 'install-llm-proxy-deploy: root required\n' >&2
   exit 1
 fi
-if [ "$#" -ne 3 ]; then
-  printf 'usage: %s <helper-sha256> <service-sha256> <timer-sha256>\n' "$0" >&2
+if [ "$#" -ne 4 ]; then
+  printf 'usage: %s <helper-sha256> <service-sha256> <timer-sha256> <capability-sha256>\n' \
+    "$0" >&2
   exit 2
 fi
 for expected in "$@"; do
@@ -25,39 +26,47 @@ test "$(sha256sum "$helper" | cut -d' ' -f1)" = "$1"
 test "$(sha256sum "$service_unit" | cut -d' ' -f1)" = "$2"
 test "$(sha256sum "$timer_unit" | cut -d' ' -f1)" = "$3"
 
-runner_user=ci-runner-ci
-runner_unit=actions.runner.Arcanada-one.arcana-prod-ci.service
+runner_users=(ci-runner ci-runner-ci)
 docker_gid="$(getent group docker | cut -d: -f3)"
-if ! id "$runner_user" >/dev/null 2>&1; then
+if ! id ci-runner-ci >/dev/null 2>&1; then
   printf 'install-llm-proxy-deploy: required runner user is absent\n' >&2
   exit 1
 fi
-if id -nG "$runner_user" | tr ' ' '\n' | grep -Fxq docker; then
-  printf 'install-llm-proxy-deploy: %s still belongs to docker group\n' \
-    "$runner_user" >&2
-  exit 1
-fi
-if runuser -u "$runner_user" -- test -r /run/docker.sock ||
-  runuser -u "$runner_user" -- test -w /run/docker.sock; then
-  printf 'install-llm-proxy-deploy: %s can still access Docker socket\n' \
-    "$runner_user" >&2
-  exit 1
-fi
-runner_pid="$(systemctl show --property MainPID --value "$runner_unit")"
-if [[ "$runner_pid" =~ ^[1-9][0-9]*$ ]] &&
-  awk -v gid="$docker_gid" '
-    /^Groups:/ {
-      for (index = 2; index <= NF; index += 1) {
-        if ($index == gid) exit 0
+for runner_user in "${runner_users[@]}"; do
+  if ! id "$runner_user" >/dev/null 2>&1; then
+    continue
+  fi
+  if id -nG "$runner_user" | tr ' ' '\n' | grep -Fxq docker; then
+    gpasswd --delete "$runner_user" docker >/dev/null
+  fi
+  if id -nG "$runner_user" | tr ' ' '\n' | grep -Fxq docker; then
+    printf 'install-llm-proxy-deploy: %s still belongs to docker group\n' \
+      "$runner_user" >&2
+    exit 1
+  fi
+  if runuser -u "$runner_user" -- test -r /run/docker.sock ||
+    runuser -u "$runner_user" -- test -w /run/docker.sock; then
+    printf 'install-llm-proxy-deploy: %s can still access Docker socket\n' \
+      "$runner_user" >&2
+    exit 1
+  fi
+  mapfile -t runner_pids < <(pgrep -u "$runner_user" || true)
+  for runner_pid in "${runner_pids[@]}"; do
+    if awk -v gid="$docker_gid" '
+      /^Groups:/ {
+        for (index = 2; index <= NF; index += 1) {
+          if ($index == gid) exit 0
+        }
+        exit 1
       }
+      END { if (NR == 0) exit 2 }
+    ' "/proc/$runner_pid/status"; then
+      printf 'install-llm-proxy-deploy: %s service retained Docker group\n' \
+        "$runner_user" >&2
       exit 1
-    }
-    END { if (NR == 0) exit 2 }
-  ' "/proc/$runner_pid/status"; then
-  printf 'install-llm-proxy-deploy: %s service retained Docker group\n' \
-    "$runner_user" >&2
-  exit 1
-fi
+    fi
+  done
+done
 
 for source in "$helper" "$service_unit" "$timer_unit"; do
   test -f "$source"
@@ -78,7 +87,10 @@ helper_tmp="$(mktemp /usr/local/sbin/.arcanada-llm-proxy-deploy.XXXXXX)"
 service_tmp="$(mktemp /etc/systemd/system/.arcanada-llm-proxy-rollback.service.XXXXXX)"
 timer_tmp="$(mktemp /etc/systemd/system/.arcanada-llm-proxy-rollback.timer.XXXXXX)"
 sudoers_tmp="$(mktemp /etc/sudoers.d/.arcanada-llm-proxy-deploy.XXXXXX)"
-trap 'rm -f -- "$helper_tmp" "$service_tmp" "$timer_tmp" "$sudoers_tmp"' EXIT
+capability_tmp="$(
+  mktemp /var/lib/arcanada-llm-proxy-deploy/.deploy-capability.sha256.XXXXXX
+)"
+trap 'rm -f -- "$helper_tmp" "$service_tmp" "$timer_tmp" "$sudoers_tmp" "$capability_tmp"' EXIT
 
 install -o root -g root -m 0755 "$helper" "$helper_tmp"
 install -o root -g root -m 0644 "$service_unit" "$service_tmp"
@@ -91,6 +103,11 @@ mv -f -- "$service_tmp" \
   /etc/systemd/system/arcanada-llm-proxy-rollback@.service
 mv -f -- "$timer_tmp" \
   /etc/systemd/system/arcanada-llm-proxy-rollback@.timer
+printf '%s\n' "$4" >"$capability_tmp"
+chown root:root "$capability_tmp"
+chmod 0600 "$capability_tmp"
+mv -f -- "$capability_tmp" \
+  /var/lib/arcanada-llm-proxy-deploy/deploy-capability.sha256
 
 systemd-analyze verify \
   /etc/systemd/system/arcanada-llm-proxy-rollback@.service \

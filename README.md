@@ -18,7 +18,7 @@ to a standalone production service.
 - **Bind:** `127.0.0.1:4000` (Tier 1 per Network Exposure Baseline).
 - **Auth:** Bearer token, Vault-managed (`arcanada/prod/env/llm-proxy.shared_secret`).
 - **Observability:** OpenTelemetry → Langfuse OTLP HTTP, span `llm-proxy-request`.
-- **Stack:** FastAPI 0.136.1, Starlette 1.0.0, httpx 0.28.1, Python 3.12.
+- **Stack:** FastAPI 0.136.1, Starlette 1.3.1, httpx 0.28.1, Python 3.12.
 
 ## Documentation (Diátaxis)
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import pathlib
@@ -18,7 +19,7 @@ import tempfile
 import time
 import urllib.request
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Any
+from typing import Any, TextIO
 
 IMAGE_REPOSITORY = "ghcr.io/arcanada-one/arcanada-llm-proxy"
 CONTAINER = "arcanada-llm-proxy"
@@ -33,6 +34,7 @@ TIMER_UNIT = pathlib.Path("/etc/systemd/system/arcanada-llm-proxy-rollback@.time
 STATE_ROOT = pathlib.Path("/var/lib/arcanada-llm-proxy-deploy")
 RELEASES_ROOT = STATE_ROOT / "releases"
 LOCK_FILE = STATE_ROOT / "deploy.lock"
+CAPABILITY_HASH_FILE = STATE_ROOT / "deploy-capability.sha256"
 LOCAL_HEALTH_URL = "http://127.0.0.1:4000/health"
 ORIGIN_ACL_UNIT = "sup0033-origin-acl.service"
 WATCHDOG_DEADLINE_SECONDS = 580
@@ -42,6 +44,7 @@ DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+CAPABILITY_LINE_RE = re.compile(r"^[0-9a-f]{64}\n$")
 
 APPLICATION_ENV_KEYS = {
     "LANGFUSE_OTLP_ENDPOINT",
@@ -101,6 +104,17 @@ def validate_run_id(value: str) -> str:
     if RUN_ID_RE.fullmatch(value) is None:
         raise ValueError("ci_run_id must be a positive decimal identifier")
     return value
+
+
+def verify_deploy_capability(stream: TextIO, expected_hash: str) -> None:
+    if SHA256_RE.fullmatch(expected_hash) is None:
+        raise DeployError("deploy capability configuration is invalid")
+    supplied = stream.readline(66)
+    if CAPABILITY_LINE_RE.fullmatch(supplied) is None:
+        raise DeployError("deploy capability rejected")
+    actual_hash = hashlib.sha256(supplied[:-1].encode("ascii")).hexdigest()
+    if not hmac.compare_digest(actual_hash, expected_hash):
+        raise DeployError("deploy capability rejected")
 
 
 def rollback_container_name(release_sha: str) -> str:
@@ -251,7 +265,12 @@ def require_root() -> None:
         raise DeployError("root-owned deploy boundary required")
 
 
-def require_root_file(path: pathlib.Path, *, executable: bool = False) -> None:
+def require_root_file(
+    path: pathlib.Path,
+    *,
+    executable: bool = False,
+    exact_mode: int | None = None,
+) -> None:
     info = path.lstat()
     if (
         not stat.S_ISREG(info.st_mode)
@@ -260,14 +279,27 @@ def require_root_file(path: pathlib.Path, *, executable: bool = False) -> None:
         or info.st_gid != 0
         or info.st_mode & 0o022
         or (executable and not info.st_mode & stat.S_IXUSR)
+        or (exact_mode is not None and stat.S_IMODE(info.st_mode) != exact_mode)
     ):
         raise DeployError("root-owned deploy bundle is insecure")
+
+
+def require_deploy_capability() -> None:
+    require_root_file(CAPABILITY_HASH_FILE, exact_mode=0o600)
+    try:
+        expected_document = CAPABILITY_HASH_FILE.read_text(encoding="ascii")
+    except (OSError, UnicodeError) as error:
+        raise DeployError("deploy capability configuration is unreadable") from error
+    if not CAPABILITY_LINE_RE.fullmatch(expected_document):
+        raise DeployError("deploy capability configuration is invalid")
+    verify_deploy_capability(sys.stdin, expected_document[:-1])
 
 
 def ensure_layout() -> None:
     require_root_file(HELPER, executable=True)
     require_root_file(SERVICE_UNIT)
     require_root_file(TIMER_UNIT)
+    require_root_file(CAPABILITY_HASH_FILE, exact_mode=0o600)
     secure_directory(STATE_ROOT)
     secure_directory(RELEASES_ROOT)
 
@@ -434,7 +466,10 @@ def timer_unit(release_sha: str) -> str:
 
 
 def stop_timer(release_sha: str) -> None:
-    command([SYSTEMCTL, "stop", timer_unit(release_sha)], check=False)
+    command(
+        [SYSTEMCTL, "disable", "--now", timer_unit(release_sha)],
+        check=False,
+    )
 
 
 def preflight() -> None:
@@ -458,16 +493,32 @@ def rollback_locked(release_sha: str, state: dict[str, Any]) -> None:
     backup = state.get("rollback_container")
     if not isinstance(backup, str) or backup != rollback_container_name(release_sha):
         raise DeployError("rollback target is invalid")
-    stop_timer(release_sha)
-    if container_exists(CONTAINER):
-        command([DOCKER, "container", "rm", "--force", CONTAINER])
-    if not container_exists(backup):
+    old_image_id = state.get("old_image_id")
+    if not isinstance(old_image_id, str) or DIGEST_RE.fullmatch(old_image_id) is None:
+        raise DeployError("rollback image identity is invalid")
+
+    if container_exists(backup):
+        backup_document = inspect_container(backup)
+        if backup_document.get("Image") != old_image_id:
+            raise DeployError("rollback image identity differs from release state")
+        state["status"] = "restoring"
+        atomic_json(release_path(release_sha), state)
+        if container_exists(CONTAINER):
+            command([DOCKER, "container", "rm", "--force", CONTAINER])
+        command([DOCKER, "container", "rename", backup, CONTAINER])
+    elif state.get("status") == "restoring" and container_exists(CONTAINER):
+        restored_during_retry = inspect_container()
+        if restored_during_retry.get("Image") != old_image_id:
+            raise DeployError("restored image identity differs from release state")
+    else:
         raise DeployError("rollback container is unavailable")
-    command([DOCKER, "container", "rename", backup, CONTAINER])
+
     command([DOCKER, "container", "start", CONTAINER])
     if not wait_for_health():
         raise DeployError("rollback container failed its health gate")
     restored = inspect_container()
+    if restored.get("Image") != old_image_id:
+        raise DeployError("restored image identity differs from release state")
     validate_runtime_topology(restored)
     state.update(
         {
@@ -477,12 +528,13 @@ def rollback_locked(release_sha: str, state: dict[str, Any]) -> None:
         }
     )
     atomic_json(release_path(release_sha), state)
+    stop_timer(release_sha)
     print(f"LLM_PROXY_ROLLBACK_PASS release_sha={release_sha}")
 
 
 def recover_after_deploy_error(release_sha: str, state: dict[str, Any]) -> None:
     backup = state.get("rollback_container")
-    if isinstance(backup, str) and container_exists(backup):
+    if (isinstance(backup, str) and container_exists(backup)) or state.get("status") == "restoring":
         rollback_locked(release_sha, state)
         return
     if not container_exists(CONTAINER):
@@ -499,6 +551,7 @@ def recover_after_deploy_error(release_sha: str, state: dict[str, Any]) -> None:
 
 
 def deploy(release_sha: str, image_digest: str, ci_run_id: str) -> None:
+    require_deploy_capability()
     release = validate_release(release_sha)
     image = validate_image_digest(image_digest)
     run_id = validate_run_id(ci_run_id)
@@ -534,7 +587,7 @@ def deploy(release_sha: str, image_digest: str, ci_run_id: str) -> None:
         atomic_json(release_path(release), state)
 
         try:
-            command([SYSTEMCTL, "start", timer_unit(release)])
+            command([SYSTEMCTL, "enable", "--now", timer_unit(release)])
             command([DOCKER, "container", "rename", CONTAINER, backup])
             command([DOCKER, "container", "stop", "--time", "15", backup])
             command(candidate_create_command(image, env_path))
@@ -562,6 +615,7 @@ def deploy(release_sha: str, image_digest: str, ci_run_id: str) -> None:
 
 
 def rollback(release_sha: str) -> None:
+    require_deploy_capability()
     release = validate_release(release_sha)
     with deploy_lock():
         state = load_release(release)
@@ -585,6 +639,7 @@ def health(release_sha: str | None = None) -> None:
 
 
 def commit(release_sha: str) -> None:
+    require_deploy_capability()
     release = validate_release(release_sha)
     with deploy_lock():
         state = load_release(release)

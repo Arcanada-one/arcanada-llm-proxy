@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import io
 import pathlib
 
 import pytest
@@ -65,6 +66,54 @@ def test_exact_release_and_digest_validation() -> None:
         broker.validate_image_digest("latest")
     with pytest.raises(ValueError):
         broker.validate_image_digest("sha256:" + "B" * 64)
+
+
+def test_deploy_capability_is_exact_stdin_value_and_constant_time_hash() -> None:
+    broker = load_broker()
+    capability = "a" * 64
+    expected_hash = broker.hashlib.sha256(capability.encode()).hexdigest()
+
+    broker.verify_deploy_capability(io.StringIO(f"{capability}\n"), expected_hash)
+
+    for supplied in ("", "b" * 64 + "\n", capability, capability.upper() + "\n"):
+        with pytest.raises(broker.DeployError, match="deploy capability rejected") as error:
+            broker.verify_deploy_capability(io.StringIO(supplied), expected_hash)
+        assert capability not in str(error.value)
+        if supplied.strip():
+            assert supplied.strip() not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("command_name", "arguments"),
+    [
+        ("deploy", ["a" * 40, "sha256:" + "b" * 64, "123"]),
+        ("commit", ["a" * 40]),
+        ("rollback", ["a" * 40]),
+    ],
+)
+def test_every_runner_invokable_mutator_requires_capability_before_action(
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    arguments: list[str],
+) -> None:
+    broker = load_broker()
+    checked: list[str] = []
+
+    def reject_capability() -> None:
+        checked.append("capability")
+        raise broker.DeployError("expected capability stop")
+
+    monkeypatch.setattr(broker, "require_deploy_capability", reject_capability)
+    monkeypatch.setattr(
+        broker,
+        "deploy_lock",
+        lambda: pytest.fail("mutation started before capability validation"),
+    )
+
+    with pytest.raises(broker.DeployError, match="expected capability stop"):
+        getattr(broker, command_name)(*arguments)
+
+    assert checked == ["capability"]
 
 
 def test_runtime_topology_is_fail_closed() -> None:
@@ -204,6 +253,156 @@ def test_failed_post_rename_uses_the_retained_container(
     assert calls == ["rollback"]
 
 
+def test_rollback_never_deletes_candidate_without_verified_backup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = load_broker()
+    release = "f" * 40
+    state = {
+        "old_image_id": "sha256:" + "1" * 64,
+        "release_sha": release,
+        "rollback_container": broker.rollback_container_name(release),
+        "status": "deployed",
+    }
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(broker, "container_exists", lambda name: name == broker.CONTAINER)
+    monkeypatch.setattr(broker, "command", lambda args, **_kwargs: commands.append(list(args)))
+
+    with pytest.raises(broker.DeployError, match="rollback container is unavailable"):
+        broker.rollback_locked(release, state)
+
+    assert commands == []
+
+
+def test_rollback_rejects_backup_image_mismatch_before_candidate_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = load_broker()
+    release = "f" * 40
+    backup = broker.rollback_container_name(release)
+    state = {
+        "old_image_id": "sha256:" + "1" * 64,
+        "release_sha": release,
+        "rollback_container": backup,
+        "status": "deployed",
+    }
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(broker, "container_exists", lambda _name: True)
+    monkeypatch.setattr(
+        broker,
+        "inspect_container",
+        lambda _name=broker.CONTAINER: {"Image": "sha256:" + "2" * 64},
+    )
+    monkeypatch.setattr(broker, "command", lambda args, **_kwargs: commands.append(list(args)))
+    monkeypatch.setattr(broker, "wait_for_health", lambda: True)
+
+    with pytest.raises(broker.DeployError, match="rollback image identity"):
+        broker.rollback_locked(release, state)
+
+    assert commands == []
+
+
+def test_rollback_timer_stops_only_after_old_image_is_healthy_and_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = load_broker()
+    release = "f" * 40
+    backup = broker.rollback_container_name(release)
+    old_image = "sha256:" + "1" * 64
+    state = {
+        "old_image_id": old_image,
+        "release_sha": release,
+        "rollback_container": backup,
+        "status": "deployed",
+    }
+    events: list[str] = []
+
+    monkeypatch.setattr(broker, "container_exists", lambda _name: True)
+
+    def inspect(name: str = broker.CONTAINER) -> dict:
+        if name == backup:
+            return {"Image": old_image}
+        restored = healthy_runtime()
+        restored["Image"] = old_image
+        return restored
+
+    monkeypatch.setattr(broker, "inspect_container", inspect)
+    monkeypatch.setattr(
+        broker,
+        "command",
+        lambda args, **_kwargs: events.append(f"command:{' '.join(args)}"),
+    )
+    monkeypatch.setattr(
+        broker,
+        "wait_for_health",
+        lambda: events.append("healthy") or True,
+    )
+    monkeypatch.setattr(
+        broker,
+        "atomic_json",
+        lambda *_args: events.append(f"state:{state['status']}"),
+    )
+    monkeypatch.setattr(
+        broker,
+        "stop_timer",
+        lambda _release: events.append("timer-stopped"),
+    )
+
+    broker.rollback_locked(release, state)
+
+    assert state["status"] == "rolled_back"
+    assert events.index("healthy") < events.index("state:rolled_back")
+    assert events.index("state:rolled_back") < events.index("timer-stopped")
+
+
+def test_failed_restore_keeps_watchdog_enabled_and_next_tick_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = load_broker()
+    release = "f" * 40
+    backup = broker.rollback_container_name(release)
+    old_image = "sha256:" + "1" * 64
+    state = {
+        "old_image_id": old_image,
+        "release_sha": release,
+        "rollback_container": backup,
+        "status": "deployed",
+    }
+    first_attempt = True
+    timer_stops: list[str] = []
+
+    def exists(name: str) -> bool:
+        return name == broker.CONTAINER or (first_attempt and name == backup)
+
+    def inspect(name: str = broker.CONTAINER) -> dict:
+        if name == backup:
+            return {"Image": old_image}
+        restored = healthy_runtime()
+        restored["Image"] = old_image
+        return restored
+
+    monkeypatch.setattr(broker, "container_exists", exists)
+    monkeypatch.setattr(broker, "inspect_container", inspect)
+    monkeypatch.setattr(broker, "command", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "atomic_json", lambda *_args: None)
+    monkeypatch.setattr(broker, "stop_timer", timer_stops.append)
+    monkeypatch.setattr(broker, "wait_for_health", lambda: not first_attempt)
+
+    with pytest.raises(broker.DeployError, match="failed its health gate"):
+        broker.rollback_locked(release, state)
+
+    assert state["status"] == "restoring"
+    assert timer_stops == []
+
+    first_attempt = False
+    broker.rollback_locked(release, state)
+
+    assert state["status"] == "rolled_back"
+    assert timer_stops == [release]
+
+
 def test_watchdog_recovers_safely_when_cutover_never_renamed_current(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,6 +447,7 @@ def test_deploy_arms_watchdog_before_destructive_rename(
     calls: list[list[str]] = []
 
     monkeypatch.setattr(broker, "deploy_lock", contextlib.nullcontext)
+    monkeypatch.setattr(broker, "require_deploy_capability", lambda: None)
     monkeypatch.setattr(broker, "preflight", lambda: None)
     monkeypatch.setattr(broker, "release_path", lambda _release: tmp_path / "release.json")
     monkeypatch.setattr(broker, "environment_path", lambda _release: tmp_path / "release.env")
@@ -279,7 +479,8 @@ def test_deploy_arms_watchdog_before_destructive_rename(
 
     watchdog_start = [
         broker.SYSTEMCTL,
-        "start",
+        "enable",
+        "--now",
         broker.timer_unit(release),
     ]
     destructive_rename = [

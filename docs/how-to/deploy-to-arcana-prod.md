@@ -7,22 +7,31 @@ by the GitHub `production` environment.
 
 ## One-time root bootstrap
 
-The production runner identity is `ci-runner-ci`. Before installing the
-service broker, remove that account from the Docker group, restart
-`actions.runner.Arcanada-one.arcana-prod-ci.service`, and verify that the
-account and the live runner process can no longer access the Docker socket.
-The installer repeats all three checks and fails closed.
+The current and legacy production runner identities are `ci-runner-ci` and
+`ci-runner`. Before installing the service broker, remove both `ci-runner` and
+`ci-runner-ci` from the Docker group. Restart every Actions runner service
+whose process runs as either account, including
+`actions.runner.Arcanada-one.arcana-prod-ci.service`, then verify that neither
+the accounts nor any retained live process can access the Docker socket. The
+installer removes any lingering Docker-group entries, then repeats the
+account, socket, and live-process checks for both identities and fails closed.
 
 From an exact reviewed checkout, calculate the bundle identities and install
-the root-owned broker:
+the root-owned broker. The fourth argument is the SHA-256 hash of the exact
+64-lowercase-hex deployment capability, not the capability itself:
 
 ```bash
 helper_sha="$(sha256sum deploy/llm_proxy_deploy.py | cut -d' ' -f1)"
 service_sha="$(sha256sum deploy/arcanada-llm-proxy-rollback@.service | cut -d' ' -f1)"
 timer_sha="$(sha256sum deploy/arcanada-llm-proxy-rollback@.timer | cut -d' ' -f1)"
 sudo deploy/install-llm-proxy-deploy.sh \
-  "${helper_sha}" "${service_sha}" "${timer_sha}"
+  "${helper_sha}" "${service_sha}" "${timer_sha}" "<CAPABILITY_SHA256>"
 ```
+
+Store the unhashed value only as the protected production environment secret
+`LLM_PROXY_DEPLOY_CAPABILITY`. The installer stores only its hash in the
+root-owned mode-0600 file
+`/var/lib/arcanada-llm-proxy-deploy/deploy-capability.sha256`.
 
 The root Docker identity must already be able to pull the private
 `ghcr.io/arcanada-one/arcanada-llm-proxy` package. Provision that credential
@@ -34,6 +43,7 @@ The installer creates:
 - `/usr/local/sbin/arcanada-llm-proxy-deploy`;
 - `arcanada-llm-proxy-rollback@.service` and `.timer`;
 - root-only state below `/var/lib/arcanada-llm-proxy-deploy`;
+- the root-only deployment-capability hash;
 - a `NOSETENV` sudo rule limited to the broker grammar.
 
 It does not restart the application.
@@ -51,7 +61,10 @@ with:
 The guard binds all three values to the successful push run and its immutable
 artifact. The Dockerless production job can call only the installed broker; it
 does not read the Docker socket, the production environment file, or the
-mutable deploy tree.
+mutable deploy tree. The protected production jobs pipe the capability over
+stdin for `deploy`, `commit`, and `rollback`; the secret never appears in
+arguments or output. Read-only `verify-bundle`, `preflight`, `health`, and
+`status` calls do not consume it.
 
 ## Cutover and health gate
 
@@ -62,7 +75,8 @@ Inside the root boundary the broker:
 2. pulls only the exact digest and checks both release-SHA image labels;
 3. snapshots the current environment into a root-only file;
 4. retains the old container and image as the rollback target;
-5. arms the recurring rollback watchdog before the first destructive rename;
+5. enables and starts the recurring rollback watchdog before the first
+   destructive rename, so the timer survives a host reboot;
 6. starts the candidate on loopback port 4000 and both reviewed networks;
 7. requires container health plus `GET /health = 200`.
 
@@ -77,9 +91,13 @@ can inspect or restore the exact retained release:
 
 ```bash
 sudo /usr/local/sbin/arcanada-llm-proxy-deploy status <RELEASE_SHA>
-sudo /usr/local/sbin/arcanada-llm-proxy-deploy rollback <RELEASE_SHA>
+printf '%s\n' "${LLM_PROXY_DEPLOY_CAPABILITY}" |
+  sudo /usr/local/sbin/arcanada-llm-proxy-deploy rollback <RELEASE_SHA>
 ```
 
-Rollback removes the candidate, renames the retained container back to the
-canonical name, starts it, and requires the same health and topology gates.
-No secret value is printed or accepted as an argument.
+Rollback verifies that the retained container uses `old_image_id` before it
+removes the candidate. It then renames the retained container back to the
+canonical name, starts it, checks the restored image identity plus the same
+health and topology gates, records success, and only then disables the
+watchdog. Failed restores leave the timer enabled for retry. No secret value
+is printed or accepted as an argument.

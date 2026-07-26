@@ -102,14 +102,16 @@ jobs:
       - name: Cut over exact digest
         env:
           CI_RUN_ID: ${{ inputs.ci_run_id }}
+          DEPLOY_CAPABILITY: ${{ secrets.LLM_PROXY_DEPLOY_CAPABILITY }}
           IMAGE_DIGEST: ${{ inputs.image_digest }}
           RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
           set -euo pipefail
-          sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy deploy \
-            "${RELEASE_SHA}" \
-            "${IMAGE_DIGEST}" \
-            "${CI_RUN_ID}"
+          printf '%s\n' "${DEPLOY_CAPABILITY}" |
+            sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy deploy \
+              "${RELEASE_SHA}" \
+              "${IMAGE_DIGEST}" \
+              "${CI_RUN_ID}"
 
   finalize:
     if: always()
@@ -121,6 +123,7 @@ jobs:
       - name: Commit green release or restore old container
         env:
           CUTOVER_RESULT: ${{ needs.cutover.result }}
+          DEPLOY_CAPABILITY: ${{ secrets.LLM_PROXY_DEPLOY_CAPABILITY }}
           GUARD_RESULT: ${{ needs.guard.result }}
           RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
@@ -132,18 +135,21 @@ jobs:
           if [ "${CUTOVER_RESULT}" != success ]; then
             if sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy \
               status "${RELEASE_SHA}" >/dev/null 2>&1; then
-              sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy \
-                rollback "${RELEASE_SHA}"
+              printf '%s\n' "${DEPLOY_CAPABILITY}" |
+                sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy \
+                  rollback "${RELEASE_SHA}"
             fi
             exit 1
           fi
           if ! sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy \
             health "${RELEASE_SHA}"; then
-            sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy \
-              rollback "${RELEASE_SHA}"
+            printf '%s\n' "${DEPLOY_CAPABILITY}" |
+              sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy \
+                rollback "${RELEASE_SHA}"
             exit 1
           fi
-          sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy commit \
-            "${RELEASE_SHA}"
+          printf '%s\n' "${DEPLOY_CAPABILITY}" |
+            sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy commit \
+              "${RELEASE_SHA}"
           sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy \
             status "${RELEASE_SHA}"
