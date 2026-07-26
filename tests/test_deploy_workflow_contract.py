@@ -174,6 +174,7 @@ def run_runner_process_gate(
     capture_text: str | None = None,
     snapshots: tuple[str, str] | None = None,
     second_snapshot_status: int = 0,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cgroup_root = cgroup_root or proc_root.parent / "cgroup"
     cgroup_root.mkdir(parents=True, exist_ok=True)
@@ -244,6 +245,7 @@ pgrep() {
             "MOCK_FIRST_SNAPSHOT": snapshots[0] if snapshots is not None else "",
             "MOCK_SECOND_SNAPSHOT": snapshots[1] if snapshots is not None else "",
             "MOCK_SECOND_SNAPSHOT_STATUS": str(second_snapshot_status),
+            **(extra_env or {}),
         },
     )
 
@@ -782,6 +784,66 @@ def test_installer_runner_process_gate_rejects_snapshot_races_and_vanished_entry
     )
     assert vanished_entry.returncode == 2
     assert "cgroup recheck failed" in vanished_entry.stderr
+
+
+def test_installer_runner_process_gate_rejects_entry_vanishing_after_glob(
+    tmp_path: pathlib.Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    cgroup_root = tmp_path / "cgroup"
+    control_group = (
+        "/system.slice/actions.runner.Arcanada-one.arcana-prod-ci.service"
+    )
+    write_process_status(proc_root, "2001", "1000 1001")
+    write_cgroup_processes(cgroup_root, control_group, "2001\n")
+    disappearing_entry = (
+        cgroup_root / control_group.removeprefix("/") / "disappearing"
+    )
+    disappearing_entry.mkdir()
+    (disappearing_entry / "cgroup.procs").write_text("")
+
+    collector = installer_function("collect_runner_cgroup_snapshot_records")
+    loop_start = '  for entry in "$cgroup_path"/*; do\n'
+    disappearance_hook = loop_start + """    if [ "$entry" = "$MOCK_DISAPPEARING_ENTRY" ]; then
+      rm -f "$entry/cgroup.procs"
+      rmdir "$entry"
+    fi
+"""
+    hooked_collector = collector.replace(loop_start, disappearance_hook)
+    assert hooked_collector != collector
+
+    result = run_runner_process_gate(
+        proc_root,
+        "988",
+        main_pid="2001",
+        pids=None,
+        cgroup_root=cgroup_root,
+        collector_text=hooked_collector,
+        extra_env={"MOCK_DISAPPEARING_ENTRY": str(disappearing_entry)},
+    )
+    assert result.returncode == 2
+    assert "cgroup enumeration failed" in result.stderr
+
+    fail_closed = """    elif [ -f "$entry" ]; then
+      :
+    else
+      printf 'install-llm-proxy-deploy: runner cgroup entry vanished or is invalid\\n' >&2
+      return 1
+"""
+    silent_skip_mutant = hooked_collector.replace(fail_closed, "")
+    assert silent_skip_mutant != hooked_collector
+    disappearing_entry.mkdir()
+    (disappearing_entry / "cgroup.procs").write_text("")
+    mutant = run_runner_process_gate(
+        proc_root,
+        "988",
+        main_pid="2001",
+        pids=None,
+        cgroup_root=cgroup_root,
+        collector_text=silent_skip_mutant,
+        extra_env={"MOCK_DISAPPEARING_ENTRY": str(disappearing_entry)},
+    )
+    assert mutant.returncode == 0
 
 
 def test_installer_runner_process_gate_validates_all_statuses_before_retained_result(

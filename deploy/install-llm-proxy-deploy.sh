@@ -140,10 +140,14 @@ collect_runner_cgroup_snapshot_records() {
     if [ -L "$entry" ]; then
       printf 'install-llm-proxy-deploy: runner cgroup contains a symlink\n' >&2
       return 1
-    fi
-    if [ -d "$entry" ]; then
+    elif [ -d "$entry" ]; then
       collect_runner_cgroup_snapshot_records \
         "$entry" "$snapshot_root" || return 1
+    elif [ -f "$entry" ]; then
+      :
+    else
+      printf 'install-llm-proxy-deploy: runner cgroup entry vanished or is invalid\n' >&2
+      return 1
     fi
   done
 }
