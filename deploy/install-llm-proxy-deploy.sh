@@ -79,6 +79,63 @@ require_runner_main_pid() {
   printf '%s\n' "$runner_pid"
 }
 
+require_runner_control_group() {
+  local runner_unit="$1"
+  local control_group
+  local expected_control_group="/system.slice/$runner_unit"
+  if ! control_group="$(
+    systemctl show --property ControlGroup --value "$runner_unit"
+  )"; then
+    printf 'install-llm-proxy-deploy: runner ControlGroup lookup failed\n' >&2
+    return 1
+  fi
+  if [ "$control_group" != "$expected_control_group" ]; then
+    printf 'install-llm-proxy-deploy: runner ControlGroup is invalid\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$control_group"
+}
+
+collect_runner_cgroup_pids() {
+  local cgroup_path="$1"
+  local procs_path="$cgroup_path/cgroup.procs"
+  local entry
+  local runner_pid
+  local -a local_pids
+
+  if [ -L "$cgroup_path" ] || [ ! -d "$cgroup_path" ]; then
+    printf 'install-llm-proxy-deploy: runner cgroup is unavailable\n' >&2
+    return 1
+  fi
+  if [ -L "$procs_path" ] || [ ! -f "$procs_path" ] ||
+    [ ! -r "$procs_path" ]; then
+    printf 'install-llm-proxy-deploy: runner cgroup.procs is unreadable\n' >&2
+    return 1
+  fi
+  if ! mapfile -t local_pids <"$procs_path"; then
+    printf 'install-llm-proxy-deploy: runner cgroup.procs read failed\n' >&2
+    return 1
+  fi
+  for runner_pid in "${local_pids[@]}"; do
+    if [[ ! "$runner_pid" =~ ^[1-9][0-9]*$ ]]; then
+      printf 'install-llm-proxy-deploy: runner cgroup process ID is invalid\n' >&2
+      return 1
+    fi
+    printf '%s\n' "$runner_pid"
+  done
+
+  shopt -s dotglob nullglob
+  for entry in "$cgroup_path"/*; do
+    if [ -L "$entry" ]; then
+      printf 'install-llm-proxy-deploy: runner cgroup contains a symlink\n' >&2
+      return 1
+    fi
+    if [ -d "$entry" ]; then
+      collect_runner_cgroup_pids "$entry" || return 1
+    fi
+  done
+}
+
 legacy_sudoers=/etc/sudoers.d/10-hermes-orch
 require_legacy_sudoers_absent "$legacy_sudoers"
 
@@ -114,18 +171,32 @@ require_runner_account_dockerless() {
 require_runner_processes_dockerless() {
   local docker_gid="$1"
   local proc_root="$2"
+  local cgroup_root="$3"
   local runner
   local runner_user
   local runner_unit
+  local control_group
+  local cgroup_path
   local runner_pid
   local main_pid
   local runner_pid_output
   local main_pid_seen
   local group_check_status
   local -a runner_pids
+  local -A seen_pids
 
   if [[ ! "$docker_gid" =~ ^[1-9][0-9]*$ ]]; then
     printf 'install-llm-proxy-deploy: Docker group GID is invalid\n' >&2
+    return 1
+  fi
+  if [[ "$proc_root" != /* ]] || [ -L "$proc_root" ] ||
+    [ ! -d "$proc_root" ]; then
+    printf 'install-llm-proxy-deploy: proc root is invalid\n' >&2
+    return 1
+  fi
+  if [[ "$cgroup_root" != /* ]] || [ -L "$cgroup_root" ] ||
+    [ ! -d "$cgroup_root" ]; then
+    printf 'install-llm-proxy-deploy: cgroup root is invalid\n' >&2
     return 1
   fi
   for runner in \
@@ -141,18 +212,33 @@ require_runner_processes_dockerless() {
       return 1
     fi
     main_pid="$runner_pid"
-    if ! runner_pid_output="$(pgrep -u "$runner_user")"; then
-      printf 'install-llm-proxy-deploy: %s has no live runner processes\n' \
+    if ! control_group="$(require_runner_control_group "$runner_unit")"; then
+      return 1
+    fi
+    cgroup_path="${cgroup_root}${control_group}"
+    if ! runner_pid_output="$(collect_runner_cgroup_pids "$cgroup_path")"; then
+      printf 'install-llm-proxy-deploy: %s cgroup enumeration failed\n' \
+        "$runner_user" >&2
+      return 1
+    fi
+    if [ -z "$runner_pid_output" ]; then
+      printf 'install-llm-proxy-deploy: %s cgroup has no live processes\n' \
         "$runner_user" >&2
       return 1
     fi
     mapfile -t runner_pids <<<"$runner_pid_output"
     main_pid_seen=0
+    seen_pids=()
     for runner_pid in "${runner_pids[@]}"; do
       if [[ ! "$runner_pid" =~ ^[1-9][0-9]*$ ]]; then
         printf 'install-llm-proxy-deploy: runner process ID is invalid\n' >&2
         return 1
       fi
+      if [[ -n "${seen_pids[$runner_pid]:-}" ]]; then
+        printf 'install-llm-proxy-deploy: duplicate runner process ID\n' >&2
+        return 1
+      fi
+      seen_pids["$runner_pid"]=1
       if [ "$runner_pid" = "$main_pid" ]; then
         main_pid_seen=1
       fi
@@ -182,7 +268,7 @@ if ! id ci-runner-ci >/dev/null 2>&1; then
   printf 'install-llm-proxy-deploy: required runner user is absent\n' >&2
   exit 1
 fi
-require_runner_processes_dockerless "$docker_gid" /proc
+require_runner_processes_dockerless "$docker_gid" /proc /sys/fs/cgroup
 
 for source in "$helper" "$service_unit" "$timer_unit"; do
   test -f "$source"
