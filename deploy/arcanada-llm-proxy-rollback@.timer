@@ -1,0 +1,11 @@
+[Unit]
+Description=Recurring Arcanada LLM Proxy rollback watchdog for release %i
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=arcanada-llm-proxy-rollback@%i.service
+
+[Install]
+WantedBy=timers.target
