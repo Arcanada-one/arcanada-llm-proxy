@@ -5,3 +5,4 @@ pytest-cov==6.0.0
 respx==0.22.0
 ruff==0.9.6
 pip-audit==2.7.3
+shellcheck-py==0.11.0.1
