@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import subprocess
@@ -40,6 +41,147 @@ def run_legacy_sudoers_preflight(path: pathlib.Path) -> subprocess.CompletedProc
         check=False,
         capture_output=True,
         text=True,
+    )
+
+
+def run_installer_function(
+    name: str,
+    *args: str,
+    preamble: str = "",
+    function_text: str | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    function_text = function_text or installer_function(name)
+    script = (
+        "set -uo pipefail\n"
+        f"{function_text}\n"
+        f"{preamble}\n"
+        f'{name} "$@"\n'
+    )
+    environment = os.environ.copy()
+    environment.update(extra_env or {})
+    return subprocess.run(
+        ["bash", "-c", script, "bash", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+
+def run_retained_docker_gid_check(
+    status_path: pathlib.Path,
+    docker_gid: int,
+    *,
+    function_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return run_installer_function(
+        "process_has_group",
+        str(status_path),
+        str(docker_gid),
+        function_text=function_text,
+    )
+
+
+def run_main_pid_check(
+    main_pid: str, *, systemctl_status: int = 0
+) -> subprocess.CompletedProcess[str]:
+    return run_installer_function(
+        "require_runner_main_pid",
+        "actions.runner.Arcanada-one.arcana-prod-ci.service",
+        preamble="""systemctl() {
+  printf '%s\n' "$MOCK_MAIN_PID"
+  return "$MOCK_SYSTEMCTL_STATUS"
+}""",
+        extra_env={
+            "MOCK_MAIN_PID": main_pid,
+            "MOCK_SYSTEMCTL_STATUS": str(systemctl_status),
+        },
+    )
+
+
+def run_account_dockerless_check(
+    groups: str,
+    *,
+    socket_accessible: bool,
+    id_status: int = 0,
+    function_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return run_installer_function(
+        "require_runner_account_dockerless",
+        "ci-runner-ci",
+        function_text=function_text,
+        preamble="""id() {
+  if [ "${1:-}" = "-nG" ]; then
+    printf '%s\n' "$MOCK_GROUPS"
+    return "$MOCK_ID_STATUS"
+  else
+    return 0
+  fi
+}
+gpasswd() { return 0; }
+runuser() { return "$MOCK_SOCKET_STATUS"; }""",
+        extra_env={
+            "MOCK_GROUPS": groups,
+            "MOCK_ID_STATUS": str(id_status),
+            "MOCK_SOCKET_STATUS": "0" if socket_accessible else "1",
+        },
+    )
+
+
+def write_process_status(
+    proc_root: pathlib.Path, pid: str, groups: str
+) -> pathlib.Path:
+    process_root = proc_root / pid
+    process_root.mkdir(parents=True)
+    status = process_root / "status"
+    status.write_text(f"Name:\trunner\nGroups:\t{groups}\n")
+    return status
+
+
+def run_runner_process_gate(
+    proc_root: pathlib.Path,
+    docker_gid: str,
+    *,
+    main_pid: str,
+    pids: str,
+    pgrep_status: int = 0,
+    gate_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    functions = "\n".join(
+        (
+            installer_function("process_has_group"),
+            installer_function("require_runner_account_dockerless"),
+            installer_function("require_runner_main_pid"),
+            gate_text or installer_function("require_runner_processes_dockerless"),
+        )
+    )
+    return run_installer_function(
+        "require_runner_processes_dockerless",
+        docker_gid,
+        str(proc_root),
+        function_text=functions,
+        preamble="""id() {
+  if [ "${1:-}" = "-nG" ]; then
+    printf '%s\n' ci-runner-ci
+    return 0
+  fi
+  [ "${1:-}" = ci-runner-ci ]
+}
+gpasswd() { return 0; }
+runuser() { return 1; }
+systemctl() {
+  printf '%s\n' "$MOCK_MAIN_PID"
+}
+pgrep() {
+  printf '%s' "$MOCK_PIDS"
+  return "$MOCK_PGREP_STATUS"
+}""",
+        extra_env={
+            "MOCK_MAIN_PID": main_pid,
+            "MOCK_PIDS": pids,
+            "MOCK_PGREP_STATUS": str(pgrep_status),
+        },
     )
 
 
@@ -110,7 +252,10 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
 
     assert "ci-runner" in text
     assert "ci-runner-ci" in text
-    assert "runner_users=(ci-runner ci-runner-ci)" in text
+    assert "'ci-runner:actions.runner.Arcanada-one.arcana-prod.service'" in text
+    assert (
+        "'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'" in text
+    )
     assert 'gpasswd --delete "$runner_user" docker' in text
     assert "legacy_deploy_root=/opt/arcanada-llm-proxy" in text
     assert 'legacy_deploy_tree="$legacy_deploy_root/code"' in text
@@ -135,6 +280,336 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
     assert "ALL=(ALL) NOPASSWD: ALL" not in text
     assert "ci-runner ALL=(root) NOPASSWD:NOSETENV:" not in text
     assert "ci-runner-ci ALL=(root) NOPASSWD:NOSETENV:" in text
+
+
+def test_installer_host_awk_detects_retained_docker_gid(
+    tmp_path: pathlib.Path,
+) -> None:
+    status = tmp_path / "status"
+    status.write_text("Name:\trunner\nGroups:\t1000 988 1001\n")
+
+    result = run_retained_docker_gid_check(status, 988)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_installer_host_awk_accepts_absent_docker_gid(
+    tmp_path: pathlib.Path,
+) -> None:
+    status = tmp_path / "status"
+    status.write_text("Name:\trunner\nGroups:\t1000 1001\n")
+
+    result = run_retained_docker_gid_check(status, 988)
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+
+
+def test_installer_host_awk_matches_exact_numeric_group_token(
+    tmp_path: pathlib.Path,
+) -> None:
+    status = tmp_path / "status"
+    status.write_text("Name:\trunner\nGroups:\t1000 988 1001\n")
+
+    result = run_retained_docker_gid_check(status, 98)
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+
+
+def test_installer_host_awk_fails_closed_on_bad_status_documents(
+    tmp_path: pathlib.Path,
+) -> None:
+    malformed_documents = (
+        "",
+        "Name:\trunner\n",
+        "Name:\trunner\nGroups:\n",
+        "Name:\trunner\nGroups:\t1000 invalid\n",
+        "Name:\trunner\nGroups:\t1000\nGroups:\t1001\n",
+        "Name:\trunner\nGroups:1000 1001\n",
+    )
+    for position, document in enumerate(malformed_documents):
+        status = tmp_path / f"status-{position}"
+        status.write_text(document)
+        result = run_retained_docker_gid_check(status, 988)
+        assert result.returncode == 2, (document, result)
+
+    missing = run_retained_docker_gid_check(tmp_path / "vanished-status", 988)
+    assert missing.returncode == 2
+    unreadable = tmp_path / "unreadable-status"
+    unreadable.mkdir()
+    assert run_retained_docker_gid_check(unreadable, 988).returncode == 2
+
+
+def test_installer_host_awk_contract_kills_known_silent_bypass_mutants(
+    tmp_path: pathlib.Path,
+) -> None:
+    status = tmp_path / "status"
+    status.write_text("Name:\trunner\nGroups:\t1000 988 1001\n")
+    malformed = tmp_path / "malformed"
+    malformed.write_text("Name:\trunner\n")
+    source = installer_function("process_has_group")
+    mutants = (
+        source.replace("field = 2", "index = 2").replace(
+            "field <= NF; field += 1", "index <= NF; index += 1"
+        ).replace("$field", "$index"),
+        source.replace('("x" $field) == ("x" gid)', "index($field, gid) == 1"),
+        source.replace("invalid || groups_seen != 1", "NR == 0"),
+    )
+
+    expected = ((status, 988, 0), (status, 98, 1), (malformed, 988, 2))
+    for mutant in mutants:
+        assert mutant != source
+        outcomes = tuple(
+            run_retained_docker_gid_check(
+                path, gid, function_text=mutant
+            ).returncode
+            for path, gid, _ in expected
+        )
+        assert outcomes != tuple(code for _, _, code in expected)
+
+
+def test_installer_main_pid_gate_accepts_only_live_positive_decimal_pid() -> None:
+    live = run_main_pid_check(str(os.getpid()))
+    assert live.returncode == 0
+    assert live.stdout.strip() == str(os.getpid())
+
+    for invalid in ("", "0", "-1", "12x", "12\n13", "999999999"):
+        result = run_main_pid_check(invalid)
+        assert result.returncode == 1, (invalid, result)
+
+    systemctl_failure = run_main_pid_check(str(os.getpid()), systemctl_status=1)
+    assert systemctl_failure.returncode == 1
+
+
+def test_installer_account_gate_rejects_primary_docker_group_and_socket_access() -> None:
+    primary_group = run_account_dockerless_check(
+        "docker ci-runner-ci", socket_accessible=False
+    )
+    assert primary_group.returncode == 1
+    assert "still belongs to docker group" in primary_group.stderr
+
+    socket_access = run_account_dockerless_check(
+        "ci-runner-ci", socket_accessible=True
+    )
+    assert socket_access.returncode == 1
+    assert "can still access Docker socket" in socket_access.stderr
+
+    clean = run_account_dockerless_check("ci-runner-ci", socket_accessible=False)
+    assert clean.returncode == 0
+    identity_error = run_account_dockerless_check(
+        "ci-runner-ci", socket_accessible=False, id_status=1
+    )
+    assert identity_error.returncode == 1
+    assert "group lookup failed" in identity_error.stderr
+
+
+def test_installer_account_gate_kills_primary_group_and_socket_bypass_mutants() -> None:
+    source = installer_function("require_runner_account_dockerless")
+    group_check = """  if printf '%s\\n' "$runner_groups" | tr ' ' '\\n' | grep -Fxq docker; then
+    printf 'install-llm-proxy-deploy: %s still belongs to docker group\\n' \\
+      "$runner_user" >&2
+    return 1
+  fi
+"""
+    socket_check = """  if runuser -u "$runner_user" -- test -r /run/docker.sock ||
+    runuser -u "$runner_user" -- test -w /run/docker.sock; then
+    printf 'install-llm-proxy-deploy: %s can still access Docker socket\\n' \\
+      "$runner_user" >&2
+    return 1
+  fi
+"""
+    group_mutant = source.replace(group_check, "")
+    socket_mutant = source.replace(socket_check, "")
+    assert group_mutant != source
+    assert socket_mutant != source
+
+    assert (
+        run_account_dockerless_check(
+            "docker ci-runner-ci",
+            socket_accessible=False,
+            function_text=group_mutant,
+        ).returncode
+        == 0
+    )
+    assert (
+        run_account_dockerless_check(
+            "ci-runner-ci",
+            socket_accessible=True,
+            function_text=socket_mutant,
+        ).returncode
+        == 0
+    )
+
+
+def test_installer_process_gate_has_no_conditional_silent_skip() -> None:
+    text = INSTALLER.read_text()
+
+    assert '[[ ! "$docker_gid" =~ ^[1-9][0-9]*$ ]]' in text
+    assert (
+        'runner_pid="$(require_runner_main_pid "$runner_unit" "$proc_root")"'
+        in text
+    )
+    assert 'if ! runner_pid_output="$(pgrep -u "$runner_user")"; then' in text
+    assert 'pgrep -u "$runner_user" || true' not in text
+    assert (
+        'process_has_group "$proc_root/$runner_pid/status" "$docker_gid"' in text
+    )
+    assert re.search(r'group_check_status="\$\?"', text)
+    assert 'if [ "$group_check_status" -ne 1 ]; then' in text
+    assert re.search(r"\]\]\s*&&\s*awk", text) is None
+    parser = installer_function("process_has_group")
+    assert parser.count("exit ") == 2
+    end = parser.index("END {")
+    assert "exit " not in parser[:end]
+
+
+def test_installer_runner_process_gate_checks_main_pid_and_every_child(
+    tmp_path: pathlib.Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    write_process_status(proc_root, "2001", "1000 1001")
+    write_process_status(proc_root, "2002", "1000 1001")
+    clean = run_runner_process_gate(
+        proc_root, "988", main_pid="2001", pids="2001\n2002\n"
+    )
+    assert clean.returncode == 0, clean
+
+    (proc_root / "2002" / "status").write_text(
+        "Name:\trunner\nGroups:\t1000 988 1001\n"
+    )
+    retained_child = run_runner_process_gate(
+        proc_root, "988", main_pid="2001", pids="2001\n2002\n"
+    )
+    assert retained_child.returncode == 1
+    assert "service retained Docker group" in retained_child.stderr
+
+
+def test_installer_runner_process_gate_fails_closed_on_enumeration_drift(
+    tmp_path: pathlib.Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    write_process_status(proc_root, "2001", "1000 1001")
+    write_process_status(proc_root, "2002", "1000 1001")
+    cases = (
+        ("main-absent", "2001", "2002\n", 0),
+        ("invalid-pid", "2001", "invalid\n", 0),
+        ("empty-pgrep", "2001", "", 0),
+        ("failed-pgrep", "2001", "", 1),
+    )
+    for name, main_pid, pids, pgrep_status in cases:
+        result = run_runner_process_gate(
+            proc_root,
+            "988",
+            main_pid=main_pid,
+            pids=pids,
+            pgrep_status=pgrep_status,
+        )
+        assert result.returncode == 1, (name, result)
+
+    vanished_child = run_runner_process_gate(
+        proc_root, "988", main_pid="2001", pids="2001\n2999\n"
+    )
+    assert vanished_child.returncode == 1
+    assert "process groups are unreadable" in vanished_child.stderr
+
+    unreadable_status = proc_root / "2003" / "status"
+    unreadable_status.mkdir(parents=True)
+    unreadable_child = run_runner_process_gate(
+        proc_root, "988", main_pid="2001", pids="2001\n2003\n"
+    )
+    assert unreadable_child.returncode == 1
+    assert "process groups are unreadable" in unreadable_child.stderr
+
+
+def test_installer_runner_process_gate_kills_main_and_child_bypass_mutants(
+    tmp_path: pathlib.Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    write_process_status(proc_root, "2001", "1000 1001")
+    write_process_status(proc_root, "2002", "1000 1001")
+    source = installer_function("require_runner_processes_dockerless")
+    main_presence_check = """    if [ "$main_pid_seen" -ne 1 ]; then
+      printf 'install-llm-proxy-deploy: runner MainPID vanished during preflight\\n' >&2
+      return 1
+    fi
+"""
+    missing_main_mutant = source.replace(main_presence_check, "")
+    main_only_mutant = source.replace(
+        'for runner_pid in "${runner_pids[@]}"; do',
+        'for runner_pid in "$main_pid"; do',
+    )
+    assert missing_main_mutant != source
+    assert main_only_mutant != source
+
+    missing_main = run_runner_process_gate(
+        proc_root,
+        "988",
+        main_pid="2001",
+        pids="2002\n",
+        gate_text=missing_main_mutant,
+    )
+    assert missing_main.returncode == 0
+    (proc_root / "2002" / "status").write_text(
+        "Name:\trunner\nGroups:\t1000 988 1001\n"
+    )
+    main_only = run_runner_process_gate(
+        proc_root,
+        "988",
+        main_pid="2001",
+        pids="2001\n2002\n",
+        gate_text=main_only_mutant,
+    )
+    assert main_only.returncode == 0
+
+
+def test_installer_runner_process_gate_rejects_invalid_docker_gid_and_mutant(
+    tmp_path: pathlib.Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    write_process_status(proc_root, "2001", "1000 1001")
+    for docker_gid in ("", "0", "-1", "98x"):
+        result = run_runner_process_gate(
+            proc_root, docker_gid, main_pid="2001", pids="2001\n"
+        )
+        assert result.returncode == 1, (docker_gid, result)
+
+    parser = installer_function("process_has_group")
+    parser_mutant = parser.replace(
+        "invalid = (gid !~ /^[1-9][0-9]*$/)", "invalid = 0"
+    )
+    gate = installer_function("require_runner_processes_dockerless")
+    gid_check = """  if [[ ! "$docker_gid" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'install-llm-proxy-deploy: Docker group GID is invalid\\n' >&2
+    return 1
+  fi
+"""
+    gate_mutant = gate.replace(gid_check, "")
+    assert parser_mutant != parser
+    assert gate_mutant != gate
+    functions = "\n".join(
+        (
+            parser_mutant,
+            installer_function("require_runner_account_dockerless"),
+            installer_function("require_runner_main_pid"),
+            gate_mutant,
+        )
+    )
+    mutant = run_installer_function(
+        "require_runner_processes_dockerless",
+        "98x",
+        str(proc_root),
+        function_text=functions,
+        preamble="""id() {
+  if [ "${1:-}" = "-nG" ]; then printf '%s\n' ci-runner-ci; return 0; fi
+  [ "${1:-}" = ci-runner-ci ]
+}
+runuser() { return 1; }
+systemctl() { printf '%s\n' 2001; }
+pgrep() { printf '%s\n' 2001; }""",
+    )
+    assert mutant.returncode == 0
 
 
 def test_installer_fails_closed_on_any_legacy_sudoers_drift(
