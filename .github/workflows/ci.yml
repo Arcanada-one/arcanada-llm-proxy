@@ -6,66 +6,126 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lint-test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, arcana-ai, docker, ci-general]
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements-dev.txt
-      - run: ruff check app/ tests/
+      - run: ruff check app/ deploy/ tests/
       - run: pytest --cov=app --cov-report=term
       - run: pip-audit --strict -r requirements.txt
-
-  network-exposure:
-    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@main
-    with:
-      compose_paths: 'docker-compose.yml'
-
-  build:
-    needs: [lint-test, network-exposure]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, linux, arcana-prod, docker]
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker build -t arcanada-llm-proxy:${{ github.sha }} .
-
-  deploy:
-    needs: [build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, linux, arcana-prod, docker]
-    concurrency:
-      group: deploy-arcanada-llm-proxy
-      cancel-in-progress: false
-    steps:
-      - name: Pull canonical deploy tree
+      - name: Validate deploy shell and workflow contracts
         run: |
           set -euo pipefail
-          # Canonical deploy tree on arcana-prod. Operator-provisioned .env lives
-          # there (shared_secret, MC_API_KEY); never overwritten by CI.
-          cd /opt/arcanada-llm-proxy/code
-          git fetch --quiet origin main
-          git reset --hard origin/main
-      - name: Up container
-        working-directory: /opt/arcanada-llm-proxy/code
-        run: docker compose --env-file .env -f docker-compose.yml up -d --build
-      - name: Wait for health
+          shellcheck -S warning deploy/*.sh
+          pytest -q tests/test_deploy_broker.py tests/test_deploy_workflow_contract.py
+
+  network-exposure:
+    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@82311756b4dbfd16ddc96e098829bd9b0dea3626 # PR #246 2026-07-26
+    with:
+      compose_paths: docker-compose.yml
+      datarim_ref: '82311756b4dbfd16ddc96e098829bd9b0dea3626'
+      runner_labels: '["self-hosted","linux","ci-general"]'
+
+  publish-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint-test, network-exposure]
+    runs-on: [self-hosted, linux, arcana-ai, docker, ci-general]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    concurrency:
+      group: publish-arcanada-llm-proxy
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish exact image
+        id: publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/arcanada-one/arcanada-llm-proxy:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.arcanada.release_sha=${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Record immutable publication identity
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
-              echo "healthy"
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "health check failed"
-          if [ -n "${{ secrets.OPSBOT_API_KEY }}" ]; then
-            curl -X POST https://ops.arcanada.one/events \
-              -H "Authorization: Bearer ${{ secrets.OPSBOT_API_KEY }}" \
-              -H "Content-Type: application/json" \
-              -d '{"agent":"github-actions","title":"arcanada-llm-proxy deploy failed","body":"health check did not pass after 30s","dedup_key":"deploy-arcanada-llm-proxy-${{ github.sha }}","category":"fatal","meta":{"service":"arcanada-llm-proxy","sha":"${{ github.sha }}"}}' || true
-          fi
-          exit 1
+          set -euo pipefail
+          [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          jq -n --arg release "${RELEASE_SHA}" --arg digest "${IMAGE_DIGEST}" \
+            '{release_sha: $release, image_digest: $digest}' > published-image.json
+      - name: Upload immutable publication identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: llm-proxy-image-${{ github.sha }}
+          path: published-image.json
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-published-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [publish-image]
+    runs-on: [self-hosted, linux, arcana-ai, docker, ci-general]
+    timeout-minutes: 10
+    permissions:
+      packages: read
+    concurrency:
+      group: verify-published-arcanada-llm-proxy
+      cancel-in-progress: false
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull and verify exact registry artifact
+        env:
+          IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="ghcr.io/arcanada-one/arcanada-llm-proxy@${IMAGE_DIGEST}"
+          docker pull "${image}"
+          test "$(docker image inspect --format \
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "${image}")" = "${RELEASE_SHA}"
+          test "$(docker image inspect --format \
+            '{{ index .Config.Labels "io.arcanada.release_sha" }}' \
+            "${image}")" = "${RELEASE_SHA}"

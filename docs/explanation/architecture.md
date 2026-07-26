@@ -45,11 +45,12 @@ reachability comes via the host network — Docker's `100.64.0.0/10` bind is unn
 because the host already has Tailscale routes. The proxy is **Internal-only** by design
 (PRD-CONN-0045 R1: ToS grey zone for Codex CLI programmatic use).
 
-## Why FastAPI 0.136.1 + Starlette 1.0.0
+## Why FastAPI 0.136.1 + Starlette 1.3.1
 
 The previous LTM-0004 v3 benchmark proxy pinned `fastapi==0.115.12`, which transitively
 brought in `starlette<0.49.0`. Starlette 0.48.0 carries CVE-2025-62727 (directory
-traversal). Bumping FastAPI to 0.136.1 unlocks Starlette 1.0.0 which patches the CVE.
+traversal). Bumping FastAPI to 0.136.1 unlocks the 1.x line; Starlette 1.3.1
+includes the original fix plus the subsequently published 1.0.x security fixes.
 `pip-audit --strict` is clean against this lock (verified at `/dr-plan` time, see
 `datarim/plans/CONN-0064-plan.md` § Live Audit Checkpoint).
 
