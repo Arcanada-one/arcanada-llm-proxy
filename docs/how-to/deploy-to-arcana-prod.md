@@ -16,6 +16,28 @@ the accounts nor any retained live process can access the Docker socket. The
 installer removes any lingering Docker-group entries, then repeats the
 account, socket, and live-process checks for both identities and fails closed.
 
+Apply this as part of the global runner migration, before registering or
+dispatching the Dockerless production workflow:
+
+1. stop routing production work to the legacy `ci-runner` identity;
+2. disable the global provisioner that recreates
+   `/etc/sudoers.d/10-hermes-orch`;
+3. remove Docker-group membership from both runner identities and restart
+   every retained runner process;
+4. run this installer and require its account, filesystem, socket, process,
+   and effective-sudo checks to pass;
+5. only then enable the `arcana-prod-ci` runner for gated cutovers.
+
+The installer idempotently changes `/opt/arcanada-llm-proxy/code` to a
+root-only deploy tree and makes
+`/opt/arcanada-llm-proxy/code/.env` root-only mode 0600 when those legacy
+paths exist. It verifies that neither runner can read, write, or traverse
+them. It also moves the known broad
+`/etc/sudoers.d/10-hermes-orch` rule to the root-only rollback artifact
+`/var/lib/arcanada-llm-proxy-deploy/disabled-sudoers/10-hermes-orch`, installs
+only the `ci-runner-ci` broker rule, and audits the effective sudo policy for
+both identities. Any remaining wildcard service control fails the install.
+
 From an exact reviewed checkout, calculate the bundle identities and install
 the root-owned broker. The fourth argument is the SHA-256 hash of the exact
 64-lowercase-hex deployment capability, not the capability itself:

@@ -83,6 +83,84 @@ exec 9>/var/lib/arcanada-llm-proxy-deploy/deploy.lock
 chmod 0600 /var/lib/arcanada-llm-proxy-deploy/deploy.lock
 flock -n 9
 
+legacy_deploy_root=/opt/arcanada-llm-proxy
+legacy_deploy_tree="$legacy_deploy_root/code"
+legacy_deploy_env="$legacy_deploy_tree/.env"
+for protected_path in "$legacy_deploy_root" "$legacy_deploy_tree"; do
+  if [ ! -e "$protected_path" ]; then
+    continue
+  fi
+  if [ -L "$protected_path" ] || [ ! -d "$protected_path" ]; then
+    printf 'install-llm-proxy-deploy: legacy deploy directory is unsafe\n' >&2
+    exit 1
+  fi
+  if ! command -v setfacl >/dev/null 2>&1; then
+    printf 'install-llm-proxy-deploy: setfacl is required for deploy-tree hardening\n' >&2
+    exit 1
+  fi
+  setfacl --remove-all "$protected_path"
+  chown root:root "$protected_path"
+  chmod 0700 "$protected_path"
+done
+if [ -e "$legacy_deploy_env" ]; then
+  if [ -L "$legacy_deploy_env" ] || [ ! -f "$legacy_deploy_env" ]; then
+    printf 'install-llm-proxy-deploy: legacy environment file is unsafe\n' >&2
+    exit 1
+  fi
+  setfacl --remove-all "$legacy_deploy_env"
+  chown root:root "$legacy_deploy_env"
+  chmod 0600 "$legacy_deploy_env"
+fi
+for runner_user in "${runner_users[@]}"; do
+  if ! id "$runner_user" >/dev/null 2>&1; then
+    continue
+  fi
+  for protected_path in \
+    "$legacy_deploy_root" \
+    "$legacy_deploy_tree" \
+    "$legacy_deploy_env"; do
+    if [ ! -e "$protected_path" ]; then
+      continue
+    fi
+    if runuser -u "$runner_user" -- test -r "$protected_path" ||
+      runuser -u "$runner_user" -- test -w "$protected_path" ||
+      runuser -u "$runner_user" -- test -x "$protected_path"; then
+      printf 'install-llm-proxy-deploy: %s retains legacy deploy-tree access\n' \
+        "$runner_user" >&2
+      exit 1
+    fi
+  done
+done
+
+legacy_sudoers=/etc/sudoers.d/10-hermes-orch
+legacy_sudoers_backup=\
+/var/lib/arcanada-llm-proxy-deploy/disabled-sudoers/10-hermes-orch
+if [ -e "$legacy_sudoers" ]; then
+  if [ -L "$legacy_sudoers" ] || [ ! -f "$legacy_sudoers" ] ||
+    [ "$(stat -c '%U:%G' "$legacy_sudoers")" != root:root ] ||
+    [ "$(stat -c '%a' "$legacy_sudoers")" != 440 ]; then
+    printf 'install-llm-proxy-deploy: legacy sudoers file is unsafe\n' >&2
+    exit 1
+  fi
+  if ! grep -Fqx \
+    'ci-runner ALL=(root) NOPASSWD: HERMES_SVC, HERMES_LOG' \
+    "$legacy_sudoers" ||
+    ! grep -Eq 'systemctl (start|stop|restart) \*' "$legacy_sudoers"; then
+    printf 'install-llm-proxy-deploy: legacy sudoers content is unexpected\n' >&2
+    exit 1
+  fi
+  install -d -o root -g root -m 0700 \
+    /var/lib/arcanada-llm-proxy-deploy/disabled-sudoers
+  if [ -e "$legacy_sudoers_backup" ] &&
+    ! cmp --silent "$legacy_sudoers" "$legacy_sudoers_backup"; then
+    printf 'install-llm-proxy-deploy: legacy sudoers backup conflicts\n' >&2
+    exit 1
+  fi
+  mv -f -- "$legacy_sudoers" "$legacy_sudoers_backup"
+  chown root:root "$legacy_sudoers_backup"
+  chmod 0600 "$legacy_sudoers_backup"
+fi
+
 helper_tmp="$(mktemp /usr/local/sbin/.arcanada-llm-proxy-deploy.XXXXXX)"
 service_tmp="$(mktemp /etc/systemd/system/.arcanada-llm-proxy-rollback.service.XXXXXX)"
 timer_tmp="$(mktemp /etc/systemd/system/.arcanada-llm-proxy-rollback.timer.XXXXXX)"
@@ -124,6 +202,24 @@ visudo -cf "$sudoers_tmp" >/dev/null
 install -o root -g root -m 0440 "$sudoers_tmp" \
   /etc/sudoers.d/arcanada-llm-proxy-deploy
 visudo -cf /etc/sudoers.d/arcanada-llm-proxy-deploy >/dev/null
+visudo -c >/dev/null
+for runner_user in "${runner_users[@]}"; do
+  if ! id "$runner_user" >/dev/null 2>&1; then
+    continue
+  fi
+  if ! sudo_report="$(sudo -n -l -U "$runner_user" 2>&1)"; then
+    printf 'install-llm-proxy-deploy: cannot audit %s sudo rules\n' \
+      "$runner_user" >&2
+    exit 1
+  fi
+  if grep -Eq \
+    'NOPASSWD:[[:space:]]+ALL|systemctl (start|stop|restart|reload) \*|journalctl --no-pager \*' \
+    <<<"$sudo_report"; then
+    printf 'install-llm-proxy-deploy: %s legacy broad sudo remains active\n' \
+      "$runner_user" >&2
+    exit 1
+  fi
+done
 systemctl daemon-reload
 
 /usr/local/sbin/arcanada-llm-proxy-deploy verify-bundle "$1" "$2" "$3"

@@ -87,6 +87,17 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
     assert "ci-runner-ci" in text
     assert "runner_users=(ci-runner ci-runner-ci)" in text
     assert 'gpasswd --delete "$runner_user" docker' in text
+    assert "legacy_deploy_root=/opt/arcanada-llm-proxy" in text
+    assert 'legacy_deploy_tree="$legacy_deploy_root/code"' in text
+    assert 'legacy_deploy_env="$legacy_deploy_tree/.env"' in text
+    assert 'chmod 0700 "$protected_path"' in text
+    assert 'chmod 0600 "$legacy_deploy_env"' in text
+    assert 'runuser -u "$runner_user" -- test -r "$protected_path"' in text
+    assert 'runuser -u "$runner_user" -- test -w "$protected_path"' in text
+    assert "legacy_sudoers=/etc/sudoers.d/10-hermes-orch" in text
+    assert "disabled-sudoers/10-hermes-orch" in text
+    assert 'sudo -n -l -U "$runner_user"' in text
+    assert "legacy broad sudo remains active" in text
     assert "still belongs to docker group" in text
     assert "can still access Docker socket" in text
     assert "service retained Docker group" in text
@@ -97,6 +108,8 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
     assert "capability-sha256" in text
     assert "printf '%s\\n' \"$4\"" in text
     assert "ALL=(ALL) NOPASSWD: ALL" not in text
+    assert "ci-runner ALL=(root) NOPASSWD:NOSETENV:" not in text
+    assert "ci-runner-ci ALL=(root) NOPASSWD:NOSETENV:" in text
 
 
 def test_watchdog_is_root_owned_hardened_and_recurring() -> None:
@@ -125,6 +138,9 @@ def test_runbook_exposes_only_the_reviewed_operator_flow() -> None:
     assert "LLM_PROXY_DEPLOY_CAPABILITY" in text
     assert "stdin" in text
     assert re.search(r"both `ci-runner` and\s+`ci-runner-ci`", text)
+    assert "/opt/arcanada-llm-proxy/code/.env" in text
+    assert "10-hermes-orch" in text
+    assert "global runner migration" in text
     assert "docker compose up" not in text
     assert "git reset --hard" not in text
 
