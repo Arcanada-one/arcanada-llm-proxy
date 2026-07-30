@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   guard:
-    runs-on: [self-hosted, linux, arcana-agents]
+    runs-on: [self-hosted, linux, arcana-devs]
     timeout-minutes: 3
     steps:
       - name: Require exact successful main CI run
