@@ -3,5 +3,5 @@ self-hosted-runner:
     - arcana-prod-ci
     - arcana-ai
     - ci-general
-    - arcana-agents
+    - arcana-devs
     - docker
