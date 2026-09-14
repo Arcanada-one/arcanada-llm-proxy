@@ -1,7 +1,6 @@
 self-hosted-runner:
   labels:
     - arcana-prod-ci
-    - arcana-ai
     - ci-general
     - arcana-devs
     - docker
