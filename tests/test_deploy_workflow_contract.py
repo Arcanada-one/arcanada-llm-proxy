@@ -253,7 +253,16 @@ pgrep() {
 def test_main_ci_builds_tests_and_publishes_off_prod() -> None:
     text = CI.read_text()
 
-    assert "[self-hosted, linux, arcana-ai, docker, ci-general]" in text
+    # The scheduling contract is "a Docker-capable pool that is not prod", not a
+    # particular host name. This asserted `arcana-ai`, which names a machine
+    # deleted 2026-07-01 (INFRA-0308, Hetzner VM 119476570) — so the test was
+    # pinning the workflow to a dead server's label and would have failed any
+    # attempt to stop naming it.
+    assert "runs-on: [self-hosted, linux, docker, ci-general]" in text
+    # What the original assertion was really protecting: this must not land on
+    # the production runner. Stated directly, so it keeps holding whatever the
+    # pool is called next.
+    assert "arcana-prod" not in text
     assert "ghcr.io/arcanada-one/arcanada-llm-proxy:${{ github.sha }}" in text
     assert "org.opencontainers.image.revision=${{ github.sha }}" in text
     assert "io.arcanada.release_sha=${{ github.sha }}" in text

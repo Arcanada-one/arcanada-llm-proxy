@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   lint-test:
-    runs-on: [self-hosted, linux, arcana-ai, docker, ci-general]
+    runs-on: [self-hosted, linux, docker, ci-general]
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -43,7 +43,7 @@ jobs:
   publish-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [lint-test, network-exposure]
-    runs-on: [self-hosted, linux, arcana-ai, docker, ci-general]
+    runs-on: [self-hosted, linux, docker, ci-general]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -100,7 +100,7 @@ jobs:
   verify-published-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [publish-image]
-    runs-on: [self-hosted, linux, arcana-ai, docker, ci-general]
+    runs-on: [self-hosted, linux, docker, ci-general]
     timeout-minutes: 10
     permissions:
       packages: read
