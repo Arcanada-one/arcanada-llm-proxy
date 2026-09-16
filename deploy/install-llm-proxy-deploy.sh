@@ -58,8 +58,22 @@ require_legacy_sudoers_absent() {
       'install-llm-proxy-deploy: legacy sudoers path is a symlink' >&2
     return 1
   fi
+  # Fail closed when the caller names nobody: a check with an empty subject
+  # list must refuse, not pass. The contract test calls the function with no
+  # accounts precisely to pin that down, and it is the right default — a
+  # future caller that forgets the argument gets the strict behaviour.
+  if [ "$#" -eq 0 ]; then
+    printf '%s\n' \
+      'install-llm-proxy-deploy: legacy sudoers must be removed by the global runner migration' \
+      >&2
+    return 1
+  fi
   for guarded_user in "$@"; do
-    id "$guarded_user" >/dev/null 2>&1 || continue
+    # Deliberately NOT gated on `id "$guarded_user"`. Whether the account
+    # currently exists is a weaker fact than whether the rule names it: an
+    # account can be created later, and the grant would then be live with no
+    # installer run in between. Matching the file is the check.
+    #
     # Word-boundary match: `actions` must not satisfy a check for `ci-runner`.
     if grep -Eq "(^|[[:space:],])${guarded_user}([[:space:],]|$)" \
       "$legacy_sudoers_path"; then
