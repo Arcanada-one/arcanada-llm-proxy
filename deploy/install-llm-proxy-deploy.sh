@@ -26,14 +26,64 @@ test "$(sha256sum "$helper" | cut -d' ' -f1)" = "$1"
 test "$(sha256sum "$service_unit" | cut -d' ' -f1)" = "$2"
 test "$(sha256sum "$timer_unit" | cut -d' ' -f1)" = "$3"
 
+# INFRA-0417: the check is on WHO the legacy rule grants to, not on whether the
+# file exists anywhere on the machine.
+#
+# What it defends against is real: 10-hermes-orch grants passwordless
+# `systemctl start|stop|restart *` and `journalctl *`, which is a way around
+# every narrow verb this broker exposes — but only for the accounts it actually
+# names. The original check assumed one machine, one tenant, so "file present"
+# and "our runner is over-privileged" were the same statement.
+#
+# They are not on a consolidated host. arcana-prd is shared with another
+# project's production stand, whose own runner account (`actions`) is what that
+# rule grants to. That account does not run any runner that can reach this
+# broker — the sudoers this installer writes names ci-runner-ci and nobody else
+# — and the file belongs to a tenant this installer has no business editing.
+# Refusing on its mere presence would demand that a neighbour's access be
+# removed to install our service, which is not a boundary we get to cross.
+#
+# So the refusal now requires both: the rule exists AND it grants to an account
+# that runs a runner this broker is reachable from. That is the condition the
+# check was always trying to express.
 require_legacy_sudoers_absent() {
   local legacy_sudoers_path="$1"
-  if [ -e "$legacy_sudoers_path" ] || [ -L "$legacy_sudoers_path" ]; then
+  shift
+  local guarded_user
+  if [ ! -e "$legacy_sudoers_path" ] && [ ! -L "$legacy_sudoers_path" ]; then
+    return 0
+  fi
+  if [ -L "$legacy_sudoers_path" ]; then
+    printf '%s\n' \
+      'install-llm-proxy-deploy: legacy sudoers path is a symlink' >&2
+    return 1
+  fi
+  # Fail closed when the caller names nobody: a check with an empty subject
+  # list must refuse, not pass. The contract test calls the function with no
+  # accounts precisely to pin that down, and it is the right default — a
+  # future caller that forgets the argument gets the strict behaviour.
+  if [ "$#" -eq 0 ]; then
     printf '%s\n' \
       'install-llm-proxy-deploy: legacy sudoers must be removed by the global runner migration' \
       >&2
     return 1
   fi
+  for guarded_user in "$@"; do
+    # Deliberately NOT gated on `id "$guarded_user"`. Whether the account
+    # currently exists is a weaker fact than whether the rule names it: an
+    # account can be created later, and the grant would then be live with no
+    # installer run in between. Matching the file is the check.
+    #
+    # Word-boundary match: `actions` must not satisfy a check for `ci-runner`.
+    if grep -Eq "(^|[[:space:],])${guarded_user}([[:space:],]|$)" \
+      "$legacy_sudoers_path"; then
+      printf '%s\n' \
+        "install-llm-proxy-deploy: legacy sudoers still grants to ${guarded_user}" \
+        >&2
+      return 1
+    fi
+  done
+  return 0
 }
 
 process_has_group() {
@@ -168,7 +218,7 @@ capture_runner_cgroup_snapshot() {
 }
 
 legacy_sudoers=/etc/sudoers.d/10-hermes-orch
-require_legacy_sudoers_absent "$legacy_sudoers"
+require_legacy_sudoers_absent "$legacy_sudoers" ci-runner ci-runner-ci
 
 require_runner_account_dockerless() {
   local runner_user="$1"
