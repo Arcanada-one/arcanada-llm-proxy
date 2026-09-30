@@ -81,6 +81,8 @@ jobs:
         with:
           ref: ${{ inputs.release_sha }}
           persist-credentials: false
+      - name: Runner broker preflight (A2-457)
+        run: scripts/ci/runner-broker-preflight.sh
       - name: Verify installed root boundary
         env:
           RELEASE_SHA: ${{ inputs.release_sha }}
@@ -120,6 +122,12 @@ jobs:
     runs-on: [self-hosted, linux, arcana-prod-ci]
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - name: Runner broker preflight (A2-457)
+        run: scripts/ci/runner-broker-preflight.sh
       - name: Commit green release or restore old container
         env:
           CUTOVER_RESULT: ${{ needs.cutover.result }}
