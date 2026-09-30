@@ -5,7 +5,7 @@
   "superseded_self_rule": "DEC-AUP-0035: the entity a receipt can never verify is the PREVIOUS VERSION OF ITSELF. When a receipt is re-issued at the same path for the same work item — the ordinary case after a rebase or a second commit on a card — the copy of it standing in the tree is superseded by construction: this run is the measurement that replaces it, so the only verdict it could carry is I14 `not_measured` about a document that no longer exists at that path once the run finishes. It is excluded with the work item and the output path that identify it, both re-derived from Git by impact_pair.receipt_problems, never asserted.",
   "verdict": "admitted"
  },
- "captured_at_utc": "2026-09-30T19:22:39Z",
+ "captured_at_utc": "2026-09-30T19:56:10Z",
  "change_set": {
   "base": "61fdde6c52146fd8fb3a2b54d9f1ec3962be0e9c",
   "files": [
@@ -19,13 +19,22 @@
     "status": "M"
    },
    {
+    "kind": "receipt",
+    "node_id": "receipt:receipts/graph/change-admission-A2-457-preflight.json",
+    "node_ids": [
+     "receipt:receipts/graph/change-admission-A2-457-preflight.json"
+    ],
+    "path": "receipts/graph/change-admission-A2-457-preflight.json",
+    "status": "A"
+   },
+   {
     "kind": "other",
     "new": true,
     "path": "scripts/ci/runner-broker-preflight.sh",
     "status": "A"
    }
   ],
-  "head": "85e17906d07ea6ab4eeddcba2190418f7f595039",
+  "head": "ea62d6e6779431b2aa767c6fd98cd5bf66bae9d3",
   "mode": "diff"
  },
  "decision_ref": "DEC-AUP-0008",
@@ -34,18 +43,18 @@
   "builder_version": "1.0.1",
   "built_at_utc": "2026-09-05T00:00:00Z",
   "graph_digest": "sha256:31dc0867d10ce3d2840be463d3349984391730e43b5e70943129303c8d70e4f2",
-  "path": "/tmp/arcana-verify/verifier-out/graph-61fdde6c5214.json",
+  "path": "/tmp/pub/vw-arcanada-llm-proxy/verifier-out/graph-61fdde6c5214.json",
   "source_commit": "61fdde6c52146fd8fb3a2b54d9f1ec3962be0e9c"
  },
  "head_graph": {
   "builder_version": "1.0.1",
   "built_at_utc": "2026-09-05T00:00:00Z",
-  "graph_digest": "sha256:623c99edd025bf4dbd9b51c18723b250d6f52a502f47263d3c0b0dc81bedb0de",
-  "path": "/tmp/arcana-verify/verifier-out/graph-head-85e17906d07e.json",
-  "source_commit": "85e17906d07ea6ab4eeddcba2190418f7f595039",
+  "graph_digest": "sha256:493b42057d49bf60f46a9578467192a0ce226ca8fc10ca9749dd660492612809",
+  "path": "/tmp/pub/vw-arcanada-llm-proxy/verifier-out/graph-head-ea62d6e67794.json",
+  "source_commit": "ea62d6e6779431b2aa767c6fd98cd5bf66bae9d3",
   "staleness": {
-   "checked_at_utc": "2026-09-30T19:22:39Z",
-   "checked_nodes": 29,
+   "checked_at_utc": "2026-09-30T19:56:10Z",
+   "checked_nodes": 30,
    "method": "manifest.dirty must be false; manifest.source_commit == change_set.head; working tree must be clean (a receipt in diff mode describes committed history only); content_hash of every whole-file node (code_unit, document, receipt; deployable_unit via its package.json) must equal the sha256 of the file bytes at head (git objects); contract/route/data_model hashes are extractor-owned (declaration text) and not recomputed",
    "mismatched_nodes": [],
    "verdict": "fresh"
@@ -53,7 +62,7 @@
  },
  "host": "public-ci-host",
  "host_redacted": true,
- "host_sha256": "f9e2add8274af8047304af38eb653f5a8034993366c22eb44a5d821b81c291b8",
+ "host_sha256": "31f2e5e32fd1e7ccb26c7303da252ddad47607fab1cf6e27c3b10c5390ba277b",
  "impact_set": {
   "deterministic_core": [
    {
@@ -94,11 +103,11 @@
   "tool": "tools/graph/verify.py",
   "version": "1.2.0"
  },
- "receipt_id": "car-verify-20260930T192239Z-85e17906",
+ "receipt_id": "car-verify-20260930T195610Z-ea62d6e6",
  "receipt_path": "receipts/graph/change-admission-A2-457-preflight.json",
  "repo": {
   "name": "Arcanada-one/arcanada-llm-proxy",
-  "path": "/home/dev/aup/pfw1/arcanada-llm-proxy"
+  "path": "/tmp/pub/arcanada-llm-proxy"
  },
  "revision_selection": {
   "base": [
@@ -107,21 +116,38 @@
   ],
   "head": [
    "code_unit:.github/workflows/deploy.yml",
-   "deployable_unit:."
+   "deployable_unit:.",
+   "receipt:receipts/graph/change-admission-A2-457-preflight.json"
   ],
   "schema": "RevisionImpactSelection/v1",
   "unmeasured_head_files": []
  },
  "schema": "ChangeAdmissionReceipt/v1",
  "staleness": {
-  "checked_at_utc": "2026-09-30T19:22:39Z",
+  "checked_at_utc": "2026-09-30T19:56:10Z",
   "method": "manifest.dirty must be false; manifest.source_commit == change_set.base; working tree must be clean (a receipt in diff mode describes committed history only); content_hash of every whole-file node (code_unit, document, receipt; deployable_unit via its package.json) must equal the sha256 of the file bytes at base (git objects); contract/route/data_model hashes are extractor-owned (declaration text) and not recomputed",
   "mismatched_nodes": [],
   "verdict": "fresh"
  },
- "structural_exclusions": [],
+ "structural_exclusions": [
+  {
+   "content_hash": {
+    "base": null,
+    "head": "sha256:b25d988910bee2fbe43349ffbd70735e2979e7f8763e63477d666493c5488ec5"
+   },
+   "entity": "receipt:receipts/graph/change-admission-A2-457-preflight.json",
+   "node_type": "receipt",
+   "path": "receipts/graph/change-admission-A2-457-preflight.json",
+   "reason": "historical receipt: asserted, never re-verified (I14); a new receipt supersedes it; superseded by construction — this run re-issues the receipt at receipts/graph/change-admission-A2-457-preflight.json for work item A2-457-preflight",
+   "rule": "DEC-AUP-0035",
+   "superseded": {
+    "receipt_path": "receipts/graph/change-admission-A2-457-preflight.json",
+    "work_item": "A2-457-preflight"
+   }
+  }
+ ],
  "tree": {
-  "commit": "85e17906d07ea6ab4eeddcba2190418f7f595039",
+  "commit": "ea62d6e6779431b2aa767c6fd98cd5bf66bae9d3",
   "dirty": false
  },
  "verdicts": [
@@ -162,8 +188,8 @@
    "exit_code": 0,
    "id": "v-workflow-config-28802fbf11c83a2e",
    "kind": "config_schema",
-   "output_ref": "/tmp/arcana-verify/verifier-out/v-workflow-config-28802fbf11c83a2e.txt",
-   "started_at_utc": "2026-09-30T19:22:40Z",
+   "output_ref": "/tmp/pub/vw-arcanada-llm-proxy/verifier-out/v-workflow-config-28802fbf11c83a2e.txt",
+   "started_at_utc": "2026-09-30T19:56:11Z",
    "summary": "bounded workflow configuration shape valid; expressions, shell, actions and hosted execution NOT_MEASURED"
   },
   {
@@ -180,13 +206,25 @@
    "exit_code": 0,
    "id": "v-fitness",
    "kind": "fitness_rules",
-   "output_ref": "/tmp/arcana-verify/verifier-out/v-fitness.json",
-   "started_at_utc": "2026-09-30T19:22:40Z",
+   "output_ref": "/tmp/pub/vw-arcanada-llm-proxy/verifier-out/v-fitness.json",
+   "started_at_utc": "2026-09-30T19:56:11Z",
    "summary": "0 finding(s): 0 new / 0 frozen; 0 entity(ies) failed"
   }
  ],
  "verify": {
-  "events": [],
+  "events": [
+   {
+    "code": "SUPERSEDED_SELF_EXCLUSION",
+    "entity": "receipt:receipts/graph/change-admission-A2-457-preflight.json",
+    "rule": "DEC-AUP-0035",
+    "text": "the receipt at receipts/graph/change-admission-A2-457-preflight.json is the previous version of the one this run is writing, for the same work item A2-457-preflight — superseded by construction, so it owes this change no verdict"
+   },
+   {
+    "code": "STRUCTURAL_EXCLUSION",
+    "rule": "DEC-AUP-0034",
+    "text": "1 affected entity(ies) owe no verdict (receipt: 1): unchanged at both revisions and given no verifier by the matrix"
+   }
+  ],
   "required_by_entity": {
    "code_unit:.github/workflows/deploy.yml": [
     "config_schema",
@@ -194,11 +232,12 @@
    ],
    "deployable_unit:.": [
     "fitness_rules"
-   ]
+   ],
+   "receipt:receipts/graph/change-admission-A2-457-preflight.json": []
   },
   "seconds": {
-   "prepare": 0.07,
-   "total": 0.29,
+   "prepare": 0.06,
+   "total": 0.25,
    "verifiers": 0.0
   }
  },
