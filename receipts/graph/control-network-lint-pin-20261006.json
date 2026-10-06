@@ -1,0 +1,247 @@
+{
+ "admission": {
+  "rule": "admitted requires every verdict = verified; failed without exemption ⇒ refused; not_measured without exemption ⇒ paused_safe; exemptions (owner + expiry) are attached by the admitting agent, never by the verifier (DEC-AUP-0008, matrix P1/P4)",
+  "structural_exclusion_rule": "DEC-AUP-0034: an affected entity is NOT verdict-owing when all three hold — the verifier matrix declares neither a mandatory nor a selectable verifier for its node type (so the only verdict it could ever carry states a property of the MATRIX, not of this change), the change set does not contain it, and its bytes are identical at base and head. Each one is listed in structural_exclusions with the content hash at both revisions that proves the byte-identity, and impact_pair.receipt_problems re-derives that proof from Git rather than believing the receipt.",
+  "superseded_self_rule": "DEC-AUP-0035: the entity a receipt can never verify is the PREVIOUS VERSION OF ITSELF. When a receipt is re-issued at the same path for the same work item — the ordinary case after a rebase or a second commit on a card — the copy of it standing in the tree is superseded by construction: this run is the measurement that replaces it, so the only verdict it could carry is I14 `not_measured` about a document that no longer exists at that path once the run finishes. It is excluded with the work item and the output path that identify it, both re-derived from Git by impact_pair.receipt_problems, never asserted.",
+  "verdict": "admitted"
+ },
+ "captured_at_utc": "2026-10-06T15:00:51Z",
+ "change_set": {
+  "base": "47fcd8e03ef6fee07e989b0e87c8a58976c6bf19",
+  "files": [
+   {
+    "kind": "config",
+    "node_id": "code_unit:.github/workflows/ci.yml",
+    "node_ids": [
+     "code_unit:.github/workflows/ci.yml"
+    ],
+    "path": ".github/workflows/ci.yml",
+    "status": "M"
+   }
+  ],
+  "head": "d5490b62f94c5f3ff8bf8d12356a9fc342c98e0b",
+  "mode": "diff"
+ },
+ "decision_ref": "DEC-AUP-0008",
+ "exemptions": [],
+ "graph": {
+  "builder_version": "1.0.3",
+  "built_at_utc": "2026-09-05T00:00:00Z",
+  "graph_digest": "sha256:25cb7ec0e0b59902d22107f48e8cfd7ea8600189585c138b2e3b947bbc363aac",
+  "path": "/home/dev/aup/control-schema-prerequisite-evidence-20261004/pin-repair-20261006T145900Z/llm-graph-final/verifier-out/graph-47fcd8e03ef6.json",
+  "source_commit": "47fcd8e03ef6fee07e989b0e87c8a58976c6bf19"
+ },
+ "head_graph": {
+  "builder_version": "1.0.3",
+  "built_at_utc": "2026-09-05T00:00:00Z",
+  "graph_digest": "sha256:8695b69c549cc6ab95da5973047ca1ea6f602664f3d7e961c1595e1669f49617",
+  "path": "/home/dev/aup/control-schema-prerequisite-evidence-20261004/pin-repair-20261006T145900Z/llm-graph-final/verifier-out/graph-head-d5490b62f94c.json",
+  "source_commit": "d5490b62f94c5f3ff8bf8d12356a9fc342c98e0b",
+  "staleness": {
+   "checked_at_utc": "2026-10-06T15:00:51Z",
+   "checked_nodes": 30,
+   "method": "manifest.dirty must be false; manifest.source_commit == change_set.head; working tree must be clean (a receipt in diff mode describes committed history only); content_hash of every whole-file node (code_unit, document, receipt; deployable_unit via its package.json) must equal the sha256 of the file bytes at head (git objects); contract/route/data_model hashes are extractor-owned (declaration text) and not recomputed",
+   "mismatched_nodes": [],
+   "verdict": "fresh"
+  }
+ },
+ "host": "arcana-devs",
+ "impact_set": {
+  "deterministic_core": [
+   {
+    "boundary": "intra_unit",
+    "depth": 1,
+    "entity": "deployable_unit:.",
+    "node_type": "deployable_unit",
+    "path": [
+     {
+      "edge_type": "deploys_to",
+      "from": "code_unit:.github/workflows/ci.yml",
+      "provenance": "deterministic",
+      "to": "deployable_unit:.",
+      "via": "containment"
+     }
+    ],
+    "revisions": [
+     "base",
+     "head"
+    ],
+    "verifier_hint": "can-i-deploy gate (GRAPH-008)"
+   },
+   {
+    "boundary": "intra_unit",
+    "depth": 1,
+    "entity": "document:SECURITY.md",
+    "node_type": "document",
+    "path": [
+     {
+      "edge_type": "documents",
+      "from": "document:SECURITY.md",
+      "provenance": "deterministic",
+      "to": "code_unit:.github/workflows/ci.yml",
+      "via": "explicit-path"
+     }
+    ],
+    "revisions": [
+     "base",
+     "head"
+    ],
+    "verifier_hint": "doc reference check (path/id still resolves)"
+   }
+  ],
+  "edge_types": "all",
+  "global_fallback": {
+   "triggered": false
+  },
+  "inferred_tail": [],
+  "max_depth": 3,
+  "method": "Union of independently revision-bound base/head traversals; reverse traversal (dependents) + forward declared-by hops (provides_route, implements_contract, maps_model of the same file, deploys_to); best path = fewest inferred/observed hops, then shortest; max_depth 3",
+  "total": 2
+ },
+ "notes": [
+  "DRAFT produced by `arcana verify` (tools/graph/verify.py 1.3.0) from matrix contracts/graph-verified-change/verifier-matrix.v1.json; selection rule: required(entity) = ⋃ edge_types[t].mandatory over the edge types t of the hops that reach the entity in its best path (i…",
+  "profile: (auto-detected); baseline: (auto-base-freeze: pre-existing findings at base frozen for this run; persist one with --freeze-baseline) (valid); selected: none; disabled: none"
+ ],
+ "producer": {
+  "tool": "tools/graph/verify.py",
+  "version": "1.3.0"
+ },
+ "receipt_id": "car-verify-20261006T150051Z-d5490b62",
+ "receipt_path": "receipts/graph/control-network-lint-pin-20261006.json",
+ "repo": {
+  "name": "Arcanada-one/arcanada-llm-proxy",
+  "path": "/home/dev/aup/llm-proxy-control-pin-20261006"
+ },
+ "revision_selection": {
+  "base": [
+   "code_unit:.github/workflows/ci.yml",
+   "deployable_unit:.",
+   "document:SECURITY.md"
+  ],
+  "head": [
+   "code_unit:.github/workflows/ci.yml",
+   "deployable_unit:.",
+   "document:SECURITY.md"
+  ],
+  "schema": "RevisionImpactSelection/v1",
+  "unmeasured_head_files": []
+ },
+ "schema": "ChangeAdmissionReceipt/v1",
+ "staleness": {
+  "checked_at_utc": "2026-10-06T15:00:51Z",
+  "method": "manifest.dirty must be false; manifest.source_commit == change_set.base; working tree must be clean (a receipt in diff mode describes committed history only); content_hash of every whole-file node (code_unit, document, receipt; deployable_unit via its package.json) must equal the sha256 of the file bytes at base (git objects); contract/route/data_model hashes are extractor-owned (declaration text) and not recomputed",
+  "mismatched_nodes": [],
+  "verdict": "fresh"
+ },
+ "structural_exclusions": [],
+ "tree": {
+  "commit": "d5490b62f94c5f3ff8bf8d12356a9fc342c98e0b",
+  "dirty": false
+ },
+ "verdicts": [
+  {
+   "entity": "code_unit:.github/workflows/ci.yml",
+   "reason": "v-workflow-config-b803fcb7f17ed923: bounded workflow configuration shape valid; expressions, shell, actions, callee interface compatibility and hosted execution NOT_MEASURED; v-fitness: no new fitness violation",
+   "verdict": "verified",
+   "verifier_ids": [
+    "v-fitness",
+    "v-workflow-config-b803fcb7f17ed923"
+   ]
+  },
+  {
+   "entity": "deployable_unit:.",
+   "reason": "v-fitness: no new violation in .",
+   "verdict": "verified",
+   "verifier_ids": [
+    "v-fitness"
+   ]
+  },
+  {
+   "entity": "document:SECURITY.md",
+   "reason": "v-doc-reference: 0 reference(s) resolve at head",
+   "verdict": "verified",
+   "verifier_ids": [
+    "v-doc-reference"
+   ]
+  }
+ ],
+ "verifier_selection": {
+  "applied": {},
+  "not_applied": [],
+  "requested": [],
+  "schema": "VerifierSelection/v1"
+ },
+ "verifiers": [
+  {
+   "command": "workflow_config.validate exact head bytes",
+   "duration_s": 0.0,
+   "entities": [
+    "code_unit:.github/workflows/ci.yml"
+   ],
+   "entity_verdicts": {
+    "code_unit:.github/workflows/ci.yml": "verified"
+   },
+   "exit_code": 0,
+   "id": "v-workflow-config-b803fcb7f17ed923",
+   "kind": "config_schema",
+   "output_ref": "/home/dev/aup/control-schema-prerequisite-evidence-20261004/pin-repair-20261006T145900Z/llm-graph-final/verifier-out/v-workflow-config-b803fcb7f17ed923.txt",
+   "started_at_utc": "2026-10-06T15:00:51Z",
+   "summary": "bounded workflow configuration shape valid; expressions, shell, actions, callee interface compatibility and hosted execution NOT_MEASURED"
+  },
+  {
+   "command": "verify.py fitness_rules FR-01..FR-05 over the head graph + head sources",
+   "duration_s": 0.0,
+   "entities": [
+    "code_unit:.github/workflows/ci.yml",
+    "deployable_unit:."
+   ],
+   "entity_verdicts": {
+    "code_unit:.github/workflows/ci.yml": "verified",
+    "deployable_unit:.": "verified"
+   },
+   "exit_code": 0,
+   "id": "v-fitness",
+   "kind": "fitness_rules",
+   "output_ref": "/home/dev/aup/control-schema-prerequisite-evidence-20261004/pin-repair-20261006T145900Z/llm-graph-final/verifier-out/v-fitness.json",
+   "started_at_utc": "2026-10-06T15:00:51Z",
+   "summary": "0 finding(s): 0 new / 0 frozen; 0 entity(ies) failed"
+  },
+  {
+   "command": "verify.py doc_reference: path / route / model references of affected documents resolve at head",
+   "duration_s": 0.0,
+   "entities": [
+    "document:SECURITY.md"
+   ],
+   "entity_verdicts": {
+    "document:SECURITY.md": "verified"
+   },
+   "exit_code": 0,
+   "id": "v-doc-reference",
+   "kind": "doc_reference",
+   "output_ref": "/home/dev/aup/control-schema-prerequisite-evidence-20261004/pin-repair-20261006T145900Z/llm-graph-final/verifier-out/v-doc-reference.txt",
+   "started_at_utc": "2026-10-06T15:00:51Z",
+   "summary": "1 document(s), 0 failed"
+  }
+ ],
+ "verify": {
+  "events": [],
+  "required_by_entity": {
+   "code_unit:.github/workflows/ci.yml": [
+    "config_schema",
+    "fitness_rules"
+   ],
+   "deployable_unit:.": [
+    "fitness_rules"
+   ],
+   "document:SECURITY.md": [
+    "doc_reference"
+   ]
+  },
+  "seconds": {
+   "prepare": 0.22,
+   "total": 0.72,
+   "verifiers": 0.0
+  }
+ },
+ "work_item": "4ce703d6-966a-4bf3-9869-4b36baac17ef"
+}
