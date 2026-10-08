@@ -20,8 +20,9 @@ Apply this as part of the global runner migration, before registering or
 dispatching the Dockerless production workflow:
 
 1. stop routing production work to the legacy `ci-runner` identity;
-2. disable the global provisioner that recreates
-   `/etc/sudoers.d/10-hermes-orch`;
+2. confirm that no provisioner recreates `/etc/sudoers.d/10-hermes-orch`
+   (the Hermes agent that owned it was retired on 2026-10-08, so on a current
+   host the file is normally already absent and the installer check passes);
 3. verify the root-owned rollback snapshot and byte-match its archived
    `etc/sudoers.d/10-hermes-orch` member against the live file;
 4. remove the live legacy sudoers file as a host-migration action and validate

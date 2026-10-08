@@ -46,6 +46,11 @@ test "$(sha256sum "$timer_unit" | cut -d' ' -f1)" = "$3"
 # So the refusal now requires both: the rule exists AND it grants to an account
 # that runs a runner this broker is reachable from. That is the condition the
 # check was always trying to express.
+#
+# 2026-10-08: the Hermes agent that owned this rule is retired and its global
+# provisioner no longer exists. The file is expected to be absent everywhere;
+# absence passes this check. The guard stays as a fail-closed tripwire in case
+# a stale copy survives on some host or is restored from an old snapshot.
 require_legacy_sudoers_absent() {
   local legacy_sudoers_path="$1"
   shift
