@@ -4,7 +4,7 @@ uvicorn[standard]==0.54.0
 httpx==0.28.1
 pydantic==2.13.5
 hvac==2.4.0
-opentelemetry-api==1.44.0
+opentelemetry-api==1.45.0
 opentelemetry-sdk==1.45.0
-opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.45.0
 PyYAML==6.0.3
