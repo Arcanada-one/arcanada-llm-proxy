@@ -143,7 +143,7 @@ def test_environment_projection_rejects_duplicate_or_unknown_names() -> None:
     assert set(projected) == {
         "LANGFUSE_OTLP_ENDPOINT",
         "LANGFUSE_OTLP_HEADERS",
-        "LLM_PROXY_FORCE_ROUTE",
+        "LLM_PROXY_ALLOWED_NETWORKS",
         "LLM_PROXY_SHARED_SECRET",
         "MC_API_KEY",
         "MC_BASE_URL",
@@ -153,6 +153,11 @@ def test_environment_projection_rejects_duplicate_or_unknown_names() -> None:
         broker.project_runtime_environment(["MC_API_KEY=a", "MC_API_KEY=b"])
     with pytest.raises(broker.DeployError):
         broker.project_runtime_environment(healthy_runtime()["Config"]["Env"] + ["UNREVIEWED_SECRET=value"])
+    # #6519: the unused force-route knob is no longer a reviewed name.
+    with pytest.raises(broker.DeployError):
+        broker.project_runtime_environment(
+            healthy_runtime()["Config"]["Env"] + ["LLM_PROXY_FORCE_ROUTE=codex"]
+        )
 
 
 def test_watchdog_decision_and_rollback_name_are_deterministic() -> None:
@@ -515,3 +520,9 @@ def test_candidate_command_has_only_reviewed_runtime_surfaces() -> None:
     ]
     assert "--volume" not in command
     assert "/run/docker.sock" not in command
+    # #6519: bounded json-file logs on every candidate.
+    assert ["--log-driver", "json-file"] == command[
+        command.index("--log-driver") : command.index("--log-driver") + 2
+    ]
+    log_opts = [command[i + 1] for i, part in enumerate(command) if part == "--log-opt"]
+    assert log_opts == ["max-size=10m", "max-file=3"]

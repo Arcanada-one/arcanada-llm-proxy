@@ -12,10 +12,12 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from .auth import require_bearer, set_shared_secret
 from .mc_client import MCClient
+from .network import allowed_networks_from_env, client_allowed
 from .observability import init_tracing, install_log_redaction, request_span
 from .router import route
 from .schemas import (
@@ -39,12 +41,16 @@ VERSION = "0.1.0"
 
 mc_client = MCClient()
 
+# Parsed at import so a malformed LLM_PROXY_ALLOWED_NETWORKS stops the process
+# before it binds, rather than serving with an unintended allowlist.
+ALLOWED_NETWORKS = allowed_networks_from_env()
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     secret = load_shared_secret()
     set_shared_secret(secret)
-    install_log_redaction(extra_secrets=[secret])
+    install_log_redaction(extra_secrets=[secret, mc_client.api_key])
     init_tracing()
     log.info("arcanada-llm-proxy %s ready", VERSION)
     try:
@@ -53,7 +59,27 @@ async def lifespan(_app: FastAPI):
         await mc_client.aclose()
 
 
-app = FastAPI(title="arcanada-llm-proxy", version=VERSION, lifespan=lifespan)
+# Interactive docs and the OpenAPI schema were served without authentication.
+# The contract lives in docs/reference/api.md; nothing consumes these routes.
+app = FastAPI(
+    title="arcanada-llm-proxy",
+    version=VERSION,
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+@app.middleware("http")
+async def restrict_v1_networks(request: Request, call_next):
+    path = request.url.path
+    if path == "/v1" or path.startswith("/v1/"):
+        host = request.client.host if request.client else None
+        if not client_allowed(host, ALLOWED_NETWORKS):
+            log.warning("refused /v1 request from a non-allowlisted network")
+            return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={"detail": "forbidden"})
+    return await call_next(request)
 
 
 @app.get("/health")

@@ -32,7 +32,8 @@ def _setup():
 def client():
     mc_client.base_url = "http://mc.test:3900"
     mc_client.api_key = "test-mc-key"
-    with TestClient(app) as c:
+    # Real loopback peer: the /v1 network allowlist (#6519) refuses the default "testclient" host.
+    with TestClient(app, client=("127.0.0.1", 50000)) as c:
         yield c
 
 

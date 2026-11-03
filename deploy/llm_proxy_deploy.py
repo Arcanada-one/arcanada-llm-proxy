@@ -46,10 +46,13 @@ RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CAPABILITY_LINE_RE = re.compile(r"^[0-9a-f]{64}\n$")
 
+# LLM_PROXY_FORCE_ROUTE was removed (#6519): no application code reads it and
+# the live container did not set it (measured 2026-11-03), so it only widened
+# the reviewed surface. LLM_PROXY_ALLOWED_NETWORKS is optional (app/network.py).
 APPLICATION_ENV_KEYS = {
     "LANGFUSE_OTLP_ENDPOINT",
     "LANGFUSE_OTLP_HEADERS",
-    "LLM_PROXY_FORCE_ROUTE",
+    "LLM_PROXY_ALLOWED_NETWORKS",
     "LLM_PROXY_SHARED_SECRET",
     "MC_API_KEY",
     "MC_BASE_URL",
@@ -70,6 +73,16 @@ IMAGE_ENV_KEYS = {
     "PYTHON_SHA256",
     "PYTHON_VERSION",
 }
+# Bounded json-file logs: the default driver config is unbounded and the
+# /health probe alone wrote ~18 MB in a week on the live host (2026-11-03).
+LOG_OPTIONS = (
+    "--log-driver",
+    "json-file",
+    "--log-opt",
+    "max-size=10m",
+    "--log-opt",
+    "max-file=3",
+)
 SAFE_PROCESS_ENV = {
     "HOME": "/root",
     "LANG": "C.UTF-8",
@@ -427,6 +440,7 @@ def candidate_create_command(image: str, env_path: pathlib.Path) -> list[str]:
         CONTAINER,
         "--restart",
         "unless-stopped",
+        *LOG_OPTIONS,
         "--env-file",
         str(env_path),
         "--publish",
