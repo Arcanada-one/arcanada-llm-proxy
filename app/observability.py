@@ -5,8 +5,10 @@ Span name: llm-proxy-request. Attributes match PRD-CONN-0045 §"Observability":
 input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens,
 route_taken, fallback_reason.
 
-Also hosts SecretRedactor — defensive logging filter that strips bearer tokens
-and an explicit shared_secret substring before any handler emits the record.
+Also hosts SecretRedactor — defensive logging filter that strips bearer tokens,
+well-known credential shapes (GitHub, OpenAI-style sk-, AWS access key ids) and
+explicit secret values (shared_secret, MC_API_KEY) from the message, the
+formatted traceback and the stack info before any handler emits the record.
 """
 
 import logging
@@ -29,6 +31,17 @@ _BEARER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)(authorization:\s*bearer\s+)\S+"), r"\1***REDACTED***"),
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9_\-\.=]{8,}"), r"\1***REDACTED***"),
 )
+# Credential shapes that can reach a log line through an upstream error body or
+# an exception message. Prefixes are kept so an operator can tell what leaked.
+_TOKEN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(github_pat_)[A-Za-z0-9_]{20,}"), r"\1***REDACTED***"),
+    (re.compile(r"\b(gh[pousr]_)[A-Za-z0-9]{20,}"), r"\1***REDACTED***"),
+    (re.compile(r"\b(sk-)[A-Za-z0-9_\-]{16,}"), r"\1***REDACTED***"),
+    (re.compile(r"\b((?:AKIA|ASIA)[0-9A-Z]{16})\b"), "***REDACTED-AWS-KEY-ID***"),
+)
+# Loggers that uvicorn configures with their own handlers and propagate=False:
+# root-level filters never see their records, so they are covered explicitly.
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 _MIN_SECRET_LEN = 8
 
 
@@ -39,19 +52,31 @@ class SecretRedactor(logging.Filter):
         super().__init__()
         self._extras = [s for s in (extra_secrets or []) if s and len(s) >= _MIN_SECRET_LEN]
 
+    def redact(self, text: str) -> str:
+        for pat, repl in _BEARER_PATTERNS + _TOKEN_PATTERNS:
+            text = pat.sub(repl, text)
+        for extra in self._extras:
+            text = text.replace(extra, "***REDACTED***")
+        return text
+
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage()
         except Exception:
             return True
-        redacted = msg
-        for pat, repl in _BEARER_PATTERNS:
-            redacted = pat.sub(repl, redacted)
-        for extra in self._extras:
-            redacted = redacted.replace(extra, "***REDACTED***")
+        redacted = self.redact(msg)
         if redacted != msg:
             record.msg = redacted
             record.args = ()
+        # Tracebacks: Formatter.format() reuses record.exc_text when it is set,
+        # so pre-render and redact it here; exception messages often embed
+        # request headers or upstream bodies.
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = self.redact(record.exc_text)
+        if record.stack_info:
+            record.stack_info = self.redact(record.stack_info)
         return True
 
 
@@ -67,6 +92,11 @@ def install_log_redaction(extra_secrets: list[str] | None = None) -> SecretRedac
     root.addFilter(f)
     for h in root.handlers:
         h.addFilter(f)
+    for name in _UVICORN_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.addFilter(f)
+        for h in logger.handlers:
+            h.addFilter(f)
     return f
 
 

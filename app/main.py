@@ -12,10 +12,12 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from .auth import require_bearer, set_shared_secret
 from .mc_client import MCClient
+from .network import allowed_networks_from_env, client_allowed
 from .observability import init_tracing, install_log_redaction, request_span
 from .router import route
 from .schemas import (
@@ -39,12 +41,16 @@ VERSION = "0.1.0"
 
 mc_client = MCClient()
 
+# Parsed at import so a malformed LLM_PROXY_ALLOWED_NETWORKS stops the process
+# before it binds, rather than serving with an unintended allowlist.
+ALLOWED_NETWORKS = allowed_networks_from_env()
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     secret = load_shared_secret()
     set_shared_secret(secret)
-    install_log_redaction(extra_secrets=[secret])
+    install_log_redaction(extra_secrets=[secret, mc_client.api_key])
     init_tracing()
     log.info("arcanada-llm-proxy %s ready", VERSION)
     try:
@@ -53,7 +59,27 @@ async def lifespan(_app: FastAPI):
         await mc_client.aclose()
 
 
-app = FastAPI(title="arcanada-llm-proxy", version=VERSION, lifespan=lifespan)
+# Interactive docs and the OpenAPI schema were served without authentication.
+# The contract lives in docs/reference/api.md; nothing consumes these routes.
+app = FastAPI(
+    title="arcanada-llm-proxy",
+    version=VERSION,
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+@app.middleware("http")
+async def restrict_v1_networks(request: Request, call_next):
+    path = request.url.path
+    if path == "/v1" or path.startswith("/v1/"):
+        host = request.client.host if request.client else None
+        if not client_allowed(host, ALLOWED_NETWORKS):
+            log.warning("refused /v1 request from a non-allowlisted network")
+            return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={"detail": "forbidden"})
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -71,7 +97,9 @@ async def chat_completions(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    response, route_taken, fallback_reason = await _execute_with_fallback(connector, mc_payload)
+    response, route_taken, fallback_reason = await _execute_with_fallback(
+        connector, mc_payload, allow_paid_fallback=body.allow_paid_fallback
+    )
 
     with request_span(
         {
@@ -98,12 +126,12 @@ async def chat_completions(
 
 
 async def _execute_with_fallback(
-    connector: RouteTaken, payload: MCExecuteRequest
+    connector: RouteTaken, payload: MCExecuteRequest, *, allow_paid_fallback: bool = True
 ) -> tuple[MCResponse, RouteTaken, FallbackReason]:
     response = await mc_client.execute(connector, payload)
 
     fallback_reason: FallbackReason = "none"
-    if response.status == "error" and connector == "codex":
+    if response.status == "error" and connector == "codex" and allow_paid_fallback:
         err_type = response.error.type if response.error else ""
         if err_type in ("rate_limited", "auth_error", "execution_error", "circuit_open", "queue_timeout", "upstream_5xx"):
             log.warning("codex %s — falling back to openrouter", err_type)

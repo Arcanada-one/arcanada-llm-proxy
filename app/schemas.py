@@ -8,7 +8,7 @@ OpenAI outbound: ChatCompletion response envelope with x_arcanada extension.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 # ──────────────────────────── OpenAI inbound ──────────────────────────── #
 
@@ -36,6 +36,8 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None
     response_format: ResponseFormat | None = None
+    # Omission preserves existing callers; false blocks only the extra paid hop.
+    allow_paid_fallback: StrictBool = True
 
 
 # ──────────────────────────── MC outbound ──────────────────────────── #
