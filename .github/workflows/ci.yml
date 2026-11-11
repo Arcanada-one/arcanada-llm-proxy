@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14'
           cache: pip
@@ -43,7 +43,7 @@ jobs:
           pytest -q tests/test_deploy_broker.py tests/test_deploy_workflow_contract.py
 
   network-exposure:
-    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@5800861ad1e1a75f7e3ad986212a0faeaa1bfc98 # PR #246 2026-07-26
+    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@37a98c9e5b1b8e0abda4153a36b2e3c85ec8868c # PR #246 2026-07-26
     with:
       compose_paths: docker-compose.yml
       datarim_ref: '5800861ad1e1a75f7e3ad986212a0faeaa1bfc98'
@@ -70,7 +70,7 @@ jobs:
       - name: Setup Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -118,7 +118,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
