@@ -46,7 +46,7 @@ jobs:
     uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@37a98c9e5b1b8e0abda4153a36b2e3c85ec8868c # PR #246 2026-07-26
     with:
       compose_paths: docker-compose.yml
-      datarim_ref: '5800861ad1e1a75f7e3ad986212a0faeaa1bfc98'
+      datarim_ref: '37a98c9e5b1b8e0abda4153a36b2e3c85ec8868c'
       runner_labels: '["self-hosted","linux","ci-general"]'
 
   publish-image:
