@@ -8,6 +8,7 @@ Verifies:
   - x_arcanada extension carries route_taken + fallback_reason
 """
 
+import json
 import os
 
 import pytest
@@ -169,3 +170,147 @@ def test_chat_json_schema_429_fallback_marks_429(client):
     body = r.json()
     assert body["x_arcanada"]["route_taken"] == "openrouter"
     assert body["x_arcanada"]["fallback_reason"] == "429"
+
+
+def _schema_request_with_fallback(allowed: bool) -> dict:
+    return {
+        "model": "openrouter/auto",
+        "messages": [{"role": "user", "content": "ping"}],
+        "allow_paid_fallback": allowed,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "result",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("error_type", "retryable", "mc_status", "expected_status"),
+    [
+        ("rate_limited", True, 429, 503),
+        ("auth_error", False, 503, 502),
+        ("execution_error", True, 200, 503),
+        ("circuit_open", True, 503, 503),
+        ("queue_timeout", True, 503, 503),
+        ("upstream_5xx", True, 502, 503),
+    ],
+)
+@respx.mock(assert_all_called=False)
+def test_disallowed_paid_fallback_returns_original_error_without_second_call(
+    client, error_type, retryable, mc_status, expected_status, respx_mock
+):
+    message = f"Codex failed: {error_type}"
+    upstream = _codex_retryable_error().json()
+    upstream["error"] = {"type": error_type, "message": message, "retryable": retryable}
+    codex = respx_mock.post("http://mc.test:3900/connectors/codex/execute").mock(
+        return_value=Response(mc_status, json=upstream)
+    )
+    openrouter = respx_mock.post("http://mc.test:3900/connectors/openrouter/execute").mock(
+        return_value=_openrouter_success()
+    )
+
+    r = client.post(
+        "/v1/chat/completions",
+        json=_schema_request_with_fallback(False),
+        headers={"Authorization": f"Bearer {SECRET}"},
+    )
+
+    assert r.status_code == expected_status
+    assert r.json() == {"detail": message}
+    assert codex.call_count == 1
+    assert openrouter.call_count == 0
+    assert "allow_paid_fallback" not in json.loads(codex.calls[0].request.content)
+
+
+@respx.mock(assert_all_called=False)
+def test_disallowed_paid_fallback_keeps_successful_codex_result(client, respx_mock):
+    upstream = _openrouter_success().json()
+    upstream.update(connector="codex", model="o4-mini")
+    codex = respx_mock.post("http://mc.test:3900/connectors/codex/execute").mock(
+        return_value=Response(200, json=upstream)
+    )
+    openrouter = respx_mock.post("http://mc.test:3900/connectors/openrouter/execute").mock(
+        return_value=_openrouter_success()
+    )
+    request = _schema_request_with_fallback(False)
+
+    r = client.post(
+        "/v1/chat/completions", json=request, headers={"Authorization": f"Bearer {SECRET}"}
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == upstream["model"]
+    assert body["choices"][0]["message"]["content"] == upstream["result"]
+    assert body["x_arcanada"]["route_taken"] == "codex"
+    assert body["x_arcanada"]["fallback_reason"] == "none"
+    assert codex.call_count == 1
+    assert openrouter.call_count == 0
+    assert json.loads(codex.calls[0].request.content)["jsonSchema"] == request["response_format"]["json_schema"]["schema"]
+
+
+@respx.mock
+def test_disallowed_paid_fallback_does_not_change_primary_openrouter_route(client):
+    openrouter = respx.post("http://mc.test:3900/connectors/openrouter/execute").mock(
+        return_value=_openrouter_success()
+    )
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "openrouter/auto",
+            "messages": [{"role": "user", "content": "ping"}],
+            "allow_paid_fallback": False,
+        },
+        headers={"Authorization": f"Bearer {SECRET}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["x_arcanada"]["route_taken"] == "openrouter"
+    assert r.json()["x_arcanada"]["fallback_reason"] == "none"
+    assert openrouter.call_count == 1
+    assert "allow_paid_fallback" not in json.loads(openrouter.calls[0].request.content)
+
+
+@respx.mock
+def test_explicitly_allowed_paid_fallback_keeps_legacy_second_call(client):
+    codex = respx.post("http://mc.test:3900/connectors/codex/execute").mock(
+        return_value=_codex_retryable_error()
+    )
+    openrouter = respx.post("http://mc.test:3900/connectors/openrouter/execute").mock(
+        return_value=_openrouter_success()
+    )
+    r = client.post(
+        "/v1/chat/completions",
+        json=_schema_request_with_fallback(True),
+        headers={"Authorization": f"Bearer {SECRET}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["x_arcanada"]["route_taken"] == "openrouter"
+    assert codex.call_count == 1
+    assert openrouter.call_count == 1
+
+
+@pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None, {}])
+@respx.mock
+def test_paid_fallback_requires_json_boolean_before_dispatch(client, invalid):
+    request = _schema_request_with_fallback(False)
+    request["allow_paid_fallback"] = invalid
+    r = client.post(
+        "/v1/chat/completions", json=request, headers={"Authorization": f"Bearer {SECRET}"}
+    )
+    assert r.status_code == 422
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+def test_disallowed_paid_fallback_still_requires_auth(client):
+    r = client.post("/v1/chat/completions", json=_schema_request_with_fallback(False))
+    assert r.status_code == 401
+    assert len(respx.calls) == 0

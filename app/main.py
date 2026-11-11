@@ -97,7 +97,9 @@ async def chat_completions(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    response, route_taken, fallback_reason = await _execute_with_fallback(connector, mc_payload)
+    response, route_taken, fallback_reason = await _execute_with_fallback(
+        connector, mc_payload, allow_paid_fallback=body.allow_paid_fallback
+    )
 
     with request_span(
         {
@@ -124,12 +126,12 @@ async def chat_completions(
 
 
 async def _execute_with_fallback(
-    connector: RouteTaken, payload: MCExecuteRequest
+    connector: RouteTaken, payload: MCExecuteRequest, *, allow_paid_fallback: bool = True
 ) -> tuple[MCResponse, RouteTaken, FallbackReason]:
     response = await mc_client.execute(connector, payload)
 
     fallback_reason: FallbackReason = "none"
-    if response.status == "error" and connector == "codex":
+    if response.status == "error" and connector == "codex" and allow_paid_fallback:
         err_type = response.error.type if response.error else ""
         if err_type in ("rate_limited", "auth_error", "execution_error", "circuit_open", "queue_timeout", "upstream_5xx"):
             log.warning("codex %s — falling back to openrouter", err_type)
