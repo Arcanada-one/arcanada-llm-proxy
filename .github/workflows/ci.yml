@@ -43,10 +43,10 @@ jobs:
           pytest -q tests/test_deploy_broker.py tests/test_deploy_workflow_contract.py
 
   network-exposure:
-    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@37a98c9e5b1b8e0abda4153a36b2e3c85ec8868c # PR #246 2026-07-26
+    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@1a6cf7c7f7bfd46c1f6e0a3f102d12a599498599 # PR #246 2026-07-26
     with:
       compose_paths: docker-compose.yml
-      datarim_ref: '37a98c9e5b1b8e0abda4153a36b2e3c85ec8868c'
+      datarim_ref: '1a6cf7c7f7bfd46c1f6e0a3f102d12a599498599'
       runner_labels: '["self-hosted","linux","ci-general"]'
 
   publish-image:
