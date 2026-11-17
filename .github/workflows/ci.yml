@@ -20,6 +20,8 @@ concurrency:
 
 jobs:
   lint-test:
+    # Datarim fork deny: refuse untrusted fork PR code on org self-hosted runners.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, docker, ci-general]
     timeout-minutes: 15
     steps:
@@ -43,6 +45,8 @@ jobs:
           pytest -q tests/test_deploy_broker.py tests/test_deploy_workflow_contract.py
 
   network-exposure:
+    # Datarim fork deny: refuse untrusted fork PR code on org self-hosted runners.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@1a6cf7c7f7bfd46c1f6e0a3f102d12a599498599 # PR #246 2026-07-26
     with:
       compose_paths: docker-compose.yml
