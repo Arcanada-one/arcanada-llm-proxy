@@ -47,10 +47,10 @@ jobs:
   network-exposure:
     # Datarim fork deny: refuse untrusted fork PR code on org self-hosted runners.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@1a6cf7c7f7bfd46c1f6e0a3f102d12a599498599 # PR #246 2026-07-26
+    uses: Arcanada-one/datarim/.github/workflows/network-exposure-lint.yml@2ef3dc606919c1b82c5fb440b49519f7f2a1e293  # v4.12.9
     with:
       compose_paths: docker-compose.yml
-      datarim_ref: '1a6cf7c7f7bfd46c1f6e0a3f102d12a599498599'
+      datarim_ref: '2ef3dc606919c1b82c5fb440b49519f7f2a1e293'
       runner_labels: '["self-hosted","linux","ci-general"]'
 
   publish-image:
