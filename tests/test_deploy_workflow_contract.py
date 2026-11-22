@@ -30,6 +30,22 @@ def installer_function(name: str) -> str:
     return match.group(0)
 
 
+def run_broker_sudo_access_check(
+    runner_user: str, sudo_report: str
+) -> subprocess.CompletedProcess[str]:
+    script = (
+        "set -euo pipefail\n"
+        f"{installer_function('require_runner_cannot_invoke_broker')}\n"
+        'require_runner_cannot_invoke_broker "$1" "$2"\n'
+    )
+    return subprocess.run(
+        ["bash", "-c", script, "bash", runner_user, sudo_report],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def run_legacy_sudoers_preflight(path: pathlib.Path) -> subprocess.CompletedProcess[str]:
     script = (
         "set -euo pipefail\n"
@@ -326,10 +342,15 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
 
     assert "ci-runner" in text
     assert "ci-runner-ci" in text
-    assert "'ci-runner:actions.runner.Arcanada-one.arcana-prod.service'" in text
+    process_gate = installer_function("require_runner_processes_dockerless")
     assert (
-        "'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'" in text
+        "'ci-runner:actions.runner.Arcanada-one.arcana-prod.service'"
+        not in process_gate
     )
+    assert (
+        "'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'" in process_gate
+    )
+    assert "runner_users=(ci-runner ci-runner-ci)" in text
     assert 'gpasswd --delete "$runner_user" docker' in text
     assert "legacy_deploy_root=/opt/arcanada-llm-proxy" in text
     assert 'legacy_deploy_tree="$legacy_deploy_root/code"' in text
@@ -354,6 +375,43 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
     assert "ALL=(ALL) NOPASSWD: ALL" not in text
     assert "ci-runner ALL=(root) NOPASSWD:NOSETENV:" not in text
     assert "ci-runner-ci ALL=(root) NOPASSWD:NOSETENV:" in text
+    assert "can access deployment capability state" in text
+    assert '"$capability_file"' in text
+
+
+def test_installer_checks_shared_group_cannot_reach_capability_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    installer = INSTALLER.read_text()
+    assert "install -d -o root -g root -m 0700" in installer
+    assert "chmod 0600 \"$capability_tmp\"" in installer
+    assert '"$capability_file"' in installer
+
+    state = tmp_path / "deploy-state"
+    state.mkdir(mode=0o700)
+    capability = state / "deploy-capability.sha256"
+    capability.write_text("0" * 64 + "\n")
+    capability.chmod(0o600)
+
+    assert state.stat().st_mode & 0o077 == 0
+    assert capability.stat().st_mode & 0o077 == 0
+
+
+def test_installer_rejects_legacy_runner_sudo_path_to_broker() -> None:
+    no_broker = run_broker_sudo_access_check(
+        "ci-runner",
+        "User ci-runner may run the following commands on host:\\n    "
+        "(root) NOPASSWD: /usr/bin/systemctl status *",
+    )
+    broker_grant = run_broker_sudo_access_check(
+        "ci-runner",
+        "User ci-runner may run the following commands on host:\\n    "
+        "(root) NOPASSWD: /usr/local/sbin/arcanada-llm-proxy-deploy preflight",
+    )
+
+    assert no_broker.returncode == 0
+    assert broker_grant.returncode == 1
+    assert "can invoke the deploy broker through sudo" in broker_grant.stderr
 
 
 def test_installer_host_awk_detects_retained_docker_gid(
@@ -1071,7 +1129,12 @@ def test_runbook_exposes_only_the_reviewed_operator_flow() -> None:
     assert "root-only" in text
     assert "LLM_PROXY_DEPLOY_CAPABILITY" in text
     assert "stdin" in text
-    assert re.search(r"both `ci-runner` and\s+`ci-runner-ci`", text)
+    assert "keep its existing Docker-group membership" in text
+    assert "remove Docker-group membership from `ci-runner-ci`" in text
+    assert "do not remove Docker access from `ci-runner`" in text
+    assert "read:packages" in text
+    assert "--password-stdin" in text
+    assert "group-readable files under that runner's home and work directories" in text
     assert "/opt/arcanada-llm-proxy/code/.env" in text
     assert "10-hermes-orch" in text
     assert "global runner migration" in text

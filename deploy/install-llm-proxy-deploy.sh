@@ -254,6 +254,16 @@ require_runner_account_dockerless() {
   fi
 }
 
+require_runner_cannot_invoke_broker() {
+  local runner_user="$1"
+  local sudo_report="$2"
+  if grep -Fq /usr/local/sbin/arcanada-llm-proxy-deploy <<<"$sudo_report"; then
+    printf 'install-llm-proxy-deploy: %s can invoke the deploy broker through sudo\n' \
+      "$runner_user" >&2
+    return 1
+  fi
+}
+
 require_runner_processes_dockerless() {
   local docker_gid="$1"
   local proc_root="$2"
@@ -292,9 +302,12 @@ require_runner_processes_dockerless() {
     return 2
   fi
   retained_group_seen=0
-  for runner in \
-    'ci-runner:actions.runner.Arcanada-one.arcana-prod.service' \
-    'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'; do
+  # Only arcana-prod-ci can invoke this broker through its sudoers grant.
+  # ci-runner serves unrelated Docker-based deploys and keeps Docker access.
+  local -a broker_runners=(
+    'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'
+  )
+  for runner in "${broker_runners[@]}"; do
     runner_user="${runner%%:*}"
     runner_unit="${runner#*:}"
     if ! id "$runner_user" >/dev/null 2>&1; then
@@ -382,6 +395,7 @@ require_runner_processes_dockerless() {
 }
 
 runner_users=(ci-runner ci-runner-ci)
+capability_file=/var/lib/arcanada-llm-proxy-deploy/deploy-capability.sha256
 docker_gid="$(getent group docker | cut -d: -f3)"
 if ! id ci-runner-ci >/dev/null 2>&1; then
   printf 'install-llm-proxy-deploy: required runner user is absent\n' >&2
@@ -487,7 +501,7 @@ printf '%s\n' "$4" >"$capability_tmp"
 chown root:root "$capability_tmp"
 chmod 0600 "$capability_tmp"
 mv -f -- "$capability_tmp" \
-  /var/lib/arcanada-llm-proxy-deploy/deploy-capability.sha256
+  "$capability_file"
 
 systemd-analyze verify \
   /etc/systemd/system/arcanada-llm-proxy-rollback@.service \
@@ -514,6 +528,10 @@ for runner_user in "${runner_users[@]}"; do
       "$runner_user" >&2
     exit 1
   fi
+  if [ "$runner_user" = ci-runner ] &&
+    ! require_runner_cannot_invoke_broker "$runner_user" "$sudo_report"; then
+    exit 1
+  fi
   if grep -Eq \
     'NOPASSWD:[[:space:]]+ALL|systemctl (start|stop|restart|reload) \*|journalctl --no-pager \*' \
     <<<"$sudo_report"; then
@@ -521,6 +539,17 @@ for runner_user in "${runner_users[@]}"; do
       "$runner_user" >&2
     exit 1
   fi
+  for protected_path in \
+    /var/lib/arcanada-llm-proxy-deploy \
+    "$capability_file"; do
+    if runuser -u "$runner_user" -- test -r "$protected_path" ||
+      runuser -u "$runner_user" -- test -w "$protected_path" ||
+      runuser -u "$runner_user" -- test -x "$protected_path"; then
+      printf 'install-llm-proxy-deploy: %s can access deployment capability state\n' \
+        "$runner_user" >&2
+      exit 1
+    fi
+  done
 done
 systemctl daemon-reload
 
