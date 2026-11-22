@@ -256,8 +256,26 @@ require_runner_account_dockerless() {
 
 require_runner_cannot_invoke_broker() {
   local runner_user="$1"
-  local sudo_report="$2"
-  if grep -Fq /usr/local/sbin/arcanada-llm-proxy-deploy <<<"$sudo_report"; then
+  local broker=/usr/local/sbin/arcanada-llm-proxy-deploy
+  local sample_release=0000000000000000000000000000000000000000
+  local sample_digest=0000000000000000000000000000000000000000000000000000000000000000
+  local sample_run=1
+
+  # Ask sudo to evaluate each exact broker command. Text matching a `sudo -l`
+  # report misses Cmnd_Alias and wildcard grants that authorize this path.
+  if sudo -n -l -U "$runner_user" "$broker" verify-bundle \
+    "$sample_digest" "$sample_digest" "$sample_digest" >/dev/null 2>&1 ||
+    sudo -n -l -U "$runner_user" "$broker" preflight >/dev/null 2>&1 ||
+    sudo -n -l -U "$runner_user" "$broker" deploy \
+      "$sample_release" "sha256:$sample_digest" "$sample_run" >/dev/null 2>&1 ||
+    sudo -n -l -U "$runner_user" "$broker" health \
+      "$sample_release" >/dev/null 2>&1 ||
+    sudo -n -l -U "$runner_user" "$broker" commit \
+      "$sample_release" >/dev/null 2>&1 ||
+    sudo -n -l -U "$runner_user" "$broker" rollback \
+      "$sample_release" >/dev/null 2>&1 ||
+    sudo -n -l -U "$runner_user" "$broker" status \
+      "$sample_release" >/dev/null 2>&1; then
     printf 'install-llm-proxy-deploy: %s can invoke the deploy broker through sudo\n' \
       "$runner_user" >&2
     return 1
@@ -529,7 +547,7 @@ for runner_user in "${runner_users[@]}"; do
     exit 1
   fi
   if [ "$runner_user" = ci-runner ] &&
-    ! require_runner_cannot_invoke_broker "$runner_user" "$sudo_report"; then
+    ! require_runner_cannot_invoke_broker "$runner_user"; then
     exit 1
   fi
   if grep -Eq \

@@ -31,18 +31,25 @@ def installer_function(name: str) -> str:
 
 
 def run_broker_sudo_access_check(
-    runner_user: str, sudo_report: str
+    runner_user: str, permitted_action: str = ""
 ) -> subprocess.CompletedProcess[str]:
     script = (
         "set -euo pipefail\n"
         f"{installer_function('require_runner_cannot_invoke_broker')}\n"
+        "sudo() {\n"
+        '  [ "${MOCK_ALLOWED_ACTION:-}" != "${6:-}" ] && return 1\n'
+        "  return 0\n"
+        "}\n"
         'require_runner_cannot_invoke_broker "$1" "$2"\n'
     )
+    environment = os.environ.copy()
+    environment["MOCK_ALLOWED_ACTION"] = permitted_action
     return subprocess.run(
-        ["bash", "-c", script, "bash", runner_user, sudo_report],
+        ["bash", "-c", script, "bash", runner_user, ""],
         check=False,
         capture_output=True,
         text=True,
+        env=environment,
     )
 
 
@@ -398,20 +405,16 @@ def test_installer_checks_shared_group_cannot_reach_capability_state(
 
 
 def test_installer_rejects_legacy_runner_sudo_path_to_broker() -> None:
-    no_broker = run_broker_sudo_access_check(
-        "ci-runner",
-        "User ci-runner may run the following commands on host:\\n    "
-        "(root) NOPASSWD: /usr/bin/systemctl status *",
-    )
-    broker_grant = run_broker_sudo_access_check(
-        "ci-runner",
-        "User ci-runner may run the following commands on host:\\n    "
-        "(root) NOPASSWD: /usr/local/sbin/arcanada-llm-proxy-deploy preflight",
+    no_broker = run_broker_sudo_access_check("ci-runner")
+    # The effective sudo check catches a command granted by alias or wildcard,
+    # even when the `sudo -l` report does not contain the literal helper path.
+    wildcard_or_alias_grant = run_broker_sudo_access_check(
+        "ci-runner", permitted_action="deploy"
     )
 
     assert no_broker.returncode == 0
-    assert broker_grant.returncode == 1
-    assert "can invoke the deploy broker through sudo" in broker_grant.stderr
+    assert wildcard_or_alias_grant.returncode == 1
+    assert "can invoke the deploy broker through sudo" in wildcard_or_alias_grant.stderr
 
 
 def test_installer_host_awk_detects_retained_docker_gid(
