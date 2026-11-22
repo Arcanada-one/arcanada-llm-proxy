@@ -282,6 +282,21 @@ require_runner_cannot_invoke_broker() {
   fi
 }
 
+require_runner_cannot_access_deploy_state() {
+  local runner_user="$1"
+  shift
+  local protected_path
+  for protected_path in "$@"; do
+    if runuser -u "$runner_user" -- test -r "$protected_path" ||
+      runuser -u "$runner_user" -- test -w "$protected_path" ||
+      runuser -u "$runner_user" -- test -x "$protected_path"; then
+      printf 'install-llm-proxy-deploy: %s can access deployment capability state\n' \
+        "$runner_user" >&2
+      return 1
+    fi
+  done
+}
+
 require_runner_processes_dockerless() {
   local docker_gid="$1"
   local proc_root="$2"
@@ -557,17 +572,10 @@ for runner_user in "${runner_users[@]}"; do
       "$runner_user" >&2
     exit 1
   fi
-  for protected_path in \
-    /var/lib/arcanada-llm-proxy-deploy \
-    "$capability_file"; do
-    if runuser -u "$runner_user" -- test -r "$protected_path" ||
-      runuser -u "$runner_user" -- test -w "$protected_path" ||
-      runuser -u "$runner_user" -- test -x "$protected_path"; then
-      printf 'install-llm-proxy-deploy: %s can access deployment capability state\n' \
-        "$runner_user" >&2
-      exit 1
-    fi
-  done
+  if ! require_runner_cannot_access_deploy_state \
+    "$runner_user" /var/lib/arcanada-llm-proxy-deploy "$capability_file"; then
+    exit 1
+  fi
 done
 systemctl daemon-reload
 

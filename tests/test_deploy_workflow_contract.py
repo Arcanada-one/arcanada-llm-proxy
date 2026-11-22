@@ -5,6 +5,8 @@ import pathlib
 import re
 import subprocess
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 DEPLOY = ROOT / ".github" / "workflows" / "deploy.yml"
@@ -50,6 +52,35 @@ def run_broker_sudo_access_check(
         capture_output=True,
         text=True,
         env=environment,
+    )
+
+
+def run_deploy_state_access_check(
+    runner_user: str,
+    state_path: pathlib.Path,
+    capability_path: pathlib.Path,
+    *,
+    accessible_path: pathlib.Path | None = None,
+    accessible_mode: str = "",
+) -> subprocess.CompletedProcess[str]:
+    return run_installer_function(
+        "require_runner_cannot_access_deploy_state",
+        runner_user,
+        str(state_path),
+        str(capability_path),
+        preamble="""runuser() {
+  if [ "${2:-}" = "$MOCK_RUNNER_USER" ] &&
+    [ "${6:-}" = "$MOCK_ACCESSIBLE_PATH" ] &&
+    [ "${5:-}" = "$MOCK_ACCESSIBLE_MODE" ]; then
+    return 0
+  fi
+  return 1
+}""",
+        extra_env={
+            "MOCK_RUNNER_USER": runner_user,
+            "MOCK_ACCESSIBLE_PATH": str(accessible_path or ""),
+            "MOCK_ACCESSIBLE_MODE": accessible_mode,
+        },
     )
 
 
@@ -402,14 +433,53 @@ def test_installer_checks_shared_group_cannot_reach_capability_state(
 
     assert state.stat().st_mode & 0o077 == 0
     assert capability.stat().st_mode & 0o077 == 0
+    for runner_user in ("ci-runner", "ci-runner-ci"):
+        inaccessible = run_deploy_state_access_check(
+            runner_user, state, capability
+        )
+        assert inaccessible.returncode == 0
 
 
-def test_installer_rejects_legacy_runner_sudo_path_to_broker() -> None:
+@pytest.mark.parametrize("runner_user", ("ci-runner", "ci-runner-ci"))
+@pytest.mark.parametrize("path_name", ("state", "capability"))
+@pytest.mark.parametrize("access_mode", ("-r", "-w", "-x"))
+def test_installer_fails_if_runner_can_access_capability_state(
+    tmp_path: pathlib.Path,
+    runner_user: str,
+    path_name: str,
+    access_mode: str,
+) -> None:
+    state = tmp_path / "deploy-state"
+    state.mkdir(mode=0o700)
+    capability = state / "deploy-capability.sha256"
+    capability.write_text("0" * 64 + "\n")
+    capability.chmod(0o600)
+    protected_path = state if path_name == "state" else capability
+
+    accessible = run_deploy_state_access_check(
+        runner_user,
+        state,
+        capability,
+        accessible_path=protected_path,
+        accessible_mode=access_mode,
+    )
+
+    assert accessible.returncode == 1
+    assert "can access deployment capability state" in accessible.stderr
+
+
+@pytest.mark.parametrize(
+    "permitted_action",
+    ("verify-bundle", "preflight", "deploy", "health", "commit", "rollback", "status"),
+)
+def test_installer_rejects_legacy_runner_sudo_path_to_broker(
+    permitted_action: str,
+) -> None:
     no_broker = run_broker_sudo_access_check("ci-runner")
     # The effective sudo check catches a command granted by alias or wildcard,
     # even when the `sudo -l` report does not contain the literal helper path.
     wildcard_or_alias_grant = run_broker_sudo_access_check(
-        "ci-runner", permitted_action="deploy"
+        "ci-runner", permitted_action=permitted_action
     )
 
     assert no_broker.returncode == 0
