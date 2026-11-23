@@ -375,6 +375,10 @@ probe_sudo_command() {
   # return exit 1 with no output when that command is denied.
   local runner_user="$1"
   shift
+  if [ "$#" -eq 0 ]; then
+    printf 'install-llm-proxy-deploy: sudo access probe requires a command\n' >&2
+    return 2
+  fi
   local expected_command="$*"
   local output
   local probe_status

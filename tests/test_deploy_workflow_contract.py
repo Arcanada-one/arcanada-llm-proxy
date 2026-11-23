@@ -214,6 +214,7 @@ def run_sudo_command_probe(
     output: str,
     *,
     path: str | None = None,
+    command_args: tuple[str, ...] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     function_text = "\n".join(
         (
@@ -233,12 +234,16 @@ hostname() {
     if path is not None:
         extra_env["PATH"] = path
         preamble = ""
+    if command_args is None:
+        command_args = (
+            "/usr/local/sbin/arcanada-llm-proxy-deploy",
+            "health",
+            "sample",
+        )
     return run_installer_function(
         "probe_sudo_command",
         "ci-runner",
-        "/usr/local/sbin/arcanada-llm-proxy-deploy",
-        "health",
-        "sample",
+        *command_args,
         function_text=function_text,
         preamble=preamble,
         extra_env=extra_env,
@@ -1361,6 +1366,9 @@ def test_sudo_command_probe_accepts_only_exact_denial_and_expected_access() -> N
 
     assert run_sudo_command_probe(1, denied).returncode == 0
     assert run_sudo_command_probe(1, "").returncode == 0
+    no_command = run_sudo_command_probe(1, "", command_args=())
+    assert no_command.returncode == 2
+    assert "requires a command" in no_command.stderr
     assert run_sudo_command_probe(0, allowed).returncode == 1
 
     unexpected_denial = run_sudo_command_probe(1, "sudo: a password is required")
