@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
+PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
 
 if [ "$(id -u)" -ne 0 ]; then
   printf 'install-llm-proxy-deploy: root required\n' >&2
@@ -17,6 +19,18 @@ for expected in "$@"; do
     exit 2
   fi
 done
+
+require_access_probe_binaries() {
+  local probe_binary
+  for probe_binary in sudo runuser; do
+    if ! command -v "$probe_binary" >/dev/null 2>&1; then
+      printf 'install-llm-proxy-deploy: required access probe command is missing: %s\n' \
+        "$probe_binary" >&2
+      return 1
+    fi
+  done
+}
+require_access_probe_binaries || exit 1
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 helper="$root/deploy/llm_proxy_deploy.py"
@@ -228,6 +242,8 @@ require_legacy_sudoers_absent "$legacy_sudoers" ci-runner ci-runner-ci
 require_runner_account_dockerless() {
   local runner_user="$1"
   local runner_groups
+  local access_mode
+  local probe_status
   if ! runner_groups="$(id -nG "$runner_user")"; then
     printf 'install-llm-proxy-deploy: %s group lookup failed\n' \
       "$runner_user" >&2
@@ -246,12 +262,201 @@ require_runner_account_dockerless() {
       "$runner_user" >&2
     return 1
   fi
-  if runuser -u "$runner_user" -- test -r /run/docker.sock ||
-    runuser -u "$runner_user" -- test -w /run/docker.sock; then
-    printf 'install-llm-proxy-deploy: %s can still access Docker socket\n' \
-      "$runner_user" >&2
-    return 1
+  for access_mode in -r -w; do
+    if probe_runuser_access "$runner_user" "$access_mode" /run/docker.sock; then
+      printf 'install-llm-proxy-deploy: %s can still access Docker socket\n' \
+        "$runner_user" >&2
+      return 1
+    else
+      probe_status=$?
+      if [ "$probe_status" -ne 1 ]; then
+        return 2
+      fi
+    fi
+  done
+}
+
+probe_runuser_access() {
+  local runner_user="$1"
+  local access_mode="$2"
+  local protected_path="$3"
+  local output
+  local probe_status
+  if ! command -v runuser >/dev/null 2>&1; then
+    printf 'install-llm-proxy-deploy: runuser access probe command is missing\n' >&2
+    return 2
   fi
+  if output="$(runuser -u "$runner_user" -- test "$access_mode" \
+    "$protected_path" 2>&1)"; then
+    probe_status=0
+  else
+    probe_status=$?
+  fi
+  case "$probe_status" in
+    0)
+      if [ -n "$output" ]; then
+        printf 'install-llm-proxy-deploy: runuser access probe returned unexpected output\n' >&2
+        return 2
+      fi
+      return 0
+      ;;
+    1)
+      if [ -z "$output" ] ||
+        [ "$output" = 'runuser: failed to execute test: Permission denied' ]; then
+        return 1
+      fi
+      printf 'install-llm-proxy-deploy: runuser access probe failed unexpectedly\n' >&2
+      return 2
+      ;;
+    *)
+      printf 'install-llm-proxy-deploy: runuser access probe exited unexpectedly (%s)\n' \
+        "$probe_status" >&2
+      return 2
+      ;;
+  esac
+}
+
+sudo_denial_output_is_expected() {
+  local runner_user="$1"
+  local output="$2"
+  [[ "$output" =~ ^User[[:space:]]+${runner_user}[[:space:]]is[[:space:]]not[[:space:]]allowed[[:space:]]to[[:space:]]run[[:space:]]sudo[[:space:]]on[[:space:]][[:alnum:]_.-]+[.]$ ]]
+}
+
+sudo_policy_output_is_expected() {
+  local runner_user="$1"
+  local output="$2"
+  local expected_command="${3:-}"
+  local line
+  local saw_user_header=0
+  local saw_command=0
+  local in_defaults=0
+  local command_line_pattern='^[[:space:]]+\([^)]*\)[[:space:]].+$'
+  while IFS= read -r line; do
+    case "$line" in
+      "User $runner_user may run the following commands on "*)
+        [[ "$line" =~ ^User[[:space:]]+${runner_user}[[:space:]]+may[[:space:]]+run[[:space:]]+the[[:space:]]+following[[:space:]]+commands[[:space:]]+on[[:space:]][[:alnum:]_.-]+:$ ]] || return 1
+        saw_user_header=1
+        in_defaults=0
+        ;;
+      "Matching Defaults entries for $runner_user on "*)
+        [[ "$line" =~ ^Matching[[:space:]]Defaults[[:space:]]entries[[:space:]]for[[:space:]]${runner_user}[[:space:]]on[[:space:]][[:alnum:]_.-]+:$ ]] || return 1
+        [ "$in_defaults" -eq 0 ] || return 1
+        in_defaults=1
+        ;;
+      '')
+        ;;
+      *)
+        if [ "$saw_user_header" -eq 1 ]; then
+          if [[ "$line" =~ $command_line_pattern ]]; then
+            if [ -z "$expected_command" ] || [[ "$line" == *"$expected_command"* ]]; then
+              saw_command=1
+            fi
+          else
+            return 1
+          fi
+        elif [ "$in_defaults" -eq 1 ] && [[ "$line" == [[:space:]]* ]]; then
+          :
+        else
+          return 1
+        fi
+        ;;
+    esac
+  done <<<"$output"
+  [ "$saw_user_header" -eq 1 ] && [ "$saw_command" -eq 1 ]
+}
+
+probe_sudo_command() {
+  local runner_user="$1"
+  shift
+  local expected_command="$1 $2"
+  local output
+  local probe_status
+  if ! command -v sudo >/dev/null 2>&1; then
+    printf 'install-llm-proxy-deploy: sudo access probe command is missing\n' >&2
+    return 2
+  fi
+  if output="$(sudo -n -l -U "$runner_user" "$@" 2>&1)"; then
+    probe_status=0
+  else
+    probe_status=$?
+  fi
+  case "$probe_status" in
+    0)
+      if ! sudo_policy_output_is_expected "$runner_user" "$output" "$expected_command"; then
+        printf 'install-llm-proxy-deploy: sudo access probe returned unexpected output\n' >&2
+        return 2
+      fi
+      return 1
+      ;;
+    1)
+      if sudo_denial_output_is_expected "$runner_user" "$output"; then
+        return 0
+      fi
+      printf 'install-llm-proxy-deploy: sudo access probe returned unexpected denial output\n' >&2
+      return 2
+      ;;
+    *)
+      printf 'install-llm-proxy-deploy: sudo access probe exited unexpectedly (%s)\n' \
+        "$probe_status" >&2
+      return 2
+      ;;
+  esac
+}
+
+probe_sudo_policy() {
+  local runner_user="$1"
+  local output
+  local probe_status
+  if ! command -v sudo >/dev/null 2>&1; then
+    printf 'install-llm-proxy-deploy: sudo access probe command is missing\n' >&2
+    return 2
+  fi
+  if output="$(sudo -n -l -U "$runner_user" 2>&1)"; then
+    probe_status=0
+  else
+    probe_status=$?
+  fi
+  case "$probe_status" in
+    0)
+      if sudo_policy_output_is_expected "$runner_user" "$output"; then
+        printf '%s\n' "$output"
+        return 0
+      fi
+      printf 'install-llm-proxy-deploy: sudo policy probe returned unexpected output\n' >&2
+      return 2
+      ;;
+    1)
+      if sudo_denial_output_is_expected "$runner_user" "$output"; then
+        return 1
+      fi
+      printf 'install-llm-proxy-deploy: sudo policy probe returned unexpected denial output\n' >&2
+      return 2
+      ;;
+    *)
+      printf 'install-llm-proxy-deploy: sudo policy probe exited unexpectedly (%s)\n' \
+        "$probe_status" >&2
+      return 2
+      ;;
+  esac
+}
+
+require_sudo_command_denied() {
+  local probe_status
+  if probe_sudo_command "$@"; then
+    return 0
+  else
+    probe_status=$?
+  fi
+  case "$probe_status" in
+    1)
+      printf 'install-llm-proxy-deploy: %s can invoke the deploy broker through sudo\n' \
+        "$1" >&2
+      return 1
+      ;;
+    *)
+      return 2
+      ;;
+  esac
 }
 
 require_runner_cannot_invoke_broker() {
@@ -260,40 +465,59 @@ require_runner_cannot_invoke_broker() {
   local sample_release=0000000000000000000000000000000000000000
   local sample_digest=0000000000000000000000000000000000000000000000000000000000000000
   local sample_run=1
+  local probe_status
+  local -a actions=(verify-bundle preflight deploy health commit rollback status)
+  local action
+  local -a command_args
 
-  # Ask sudo to evaluate each exact broker command. Text matching a `sudo -l`
-  # report misses Cmnd_Alias and wildcard grants that authorize this path.
-  if sudo -n -l -U "$runner_user" "$broker" verify-bundle \
-    "$sample_digest" "$sample_digest" "$sample_digest" >/dev/null 2>&1 ||
-    sudo -n -l -U "$runner_user" "$broker" preflight >/dev/null 2>&1 ||
-    sudo -n -l -U "$runner_user" "$broker" deploy \
-      "$sample_release" "sha256:$sample_digest" "$sample_run" >/dev/null 2>&1 ||
-    sudo -n -l -U "$runner_user" "$broker" health \
-      "$sample_release" >/dev/null 2>&1 ||
-    sudo -n -l -U "$runner_user" "$broker" commit \
-      "$sample_release" >/dev/null 2>&1 ||
-    sudo -n -l -U "$runner_user" "$broker" rollback \
-      "$sample_release" >/dev/null 2>&1 ||
-    sudo -n -l -U "$runner_user" "$broker" status \
-      "$sample_release" >/dev/null 2>&1; then
-    printf 'install-llm-proxy-deploy: %s can invoke the deploy broker through sudo\n' \
-      "$runner_user" >&2
-    return 1
-  fi
+  # The exact sudo denial is safe; every other nonzero or malformed response
+  # is an unmeasured access boundary and aborts installation.
+  for action in "${actions[@]}"; do
+    case "$action" in
+      verify-bundle)
+        command_args=("$broker" "$action" "$sample_digest" "$sample_digest" "$sample_digest")
+        ;;
+      preflight)
+        command_args=("$broker" "$action")
+        ;;
+      deploy)
+        command_args=("$broker" "$action" "$sample_release" "sha256:$sample_digest" "$sample_run")
+        ;;
+      health|commit|rollback)
+        command_args=("$broker" "$action" "$sample_release")
+        ;;
+      status)
+        command_args=("$broker" "$action" "$sample_release")
+        ;;
+    esac
+    if require_sudo_command_denied "$runner_user" "${command_args[@]}"; then
+      :
+    else
+      probe_status=$?
+      return "$probe_status"
+    fi
+  done
 }
 
 require_runner_cannot_access_deploy_state() {
   local runner_user="$1"
   shift
   local protected_path
+  local access_mode
+  local probe_status
   for protected_path in "$@"; do
-    if runuser -u "$runner_user" -- test -r "$protected_path" ||
-      runuser -u "$runner_user" -- test -w "$protected_path" ||
-      runuser -u "$runner_user" -- test -x "$protected_path"; then
-      printf 'install-llm-proxy-deploy: %s can access deployment capability state\n' \
-        "$runner_user" >&2
-      return 1
-    fi
+    for access_mode in -r -w -x; do
+      if probe_runuser_access "$runner_user" "$access_mode" "$protected_path"; then
+        printf 'install-llm-proxy-deploy: %s can access deployment capability state\n' \
+          "$runner_user" >&2
+        return 1
+      else
+        probe_status=$?
+        if [ "$probe_status" -ne 1 ]; then
+          return 2
+        fi
+      fi
+    done
   done
 }
 
@@ -500,13 +724,18 @@ for runner_user in "${runner_users[@]}"; do
     if [ ! -e "$protected_path" ]; then
       continue
     fi
-    if runuser -u "$runner_user" -- test -r "$protected_path" ||
-      runuser -u "$runner_user" -- test -w "$protected_path" ||
-      runuser -u "$runner_user" -- test -x "$protected_path"; then
-      printf 'install-llm-proxy-deploy: %s retains legacy deploy-tree access\n' \
-        "$runner_user" >&2
-      exit 1
-    fi
+    for access_mode in -r -w -x; do
+      if probe_runuser_access "$runner_user" "$access_mode" "$protected_path"; then
+        printf 'install-llm-proxy-deploy: %s retains legacy deploy-tree access\n' \
+          "$runner_user" >&2
+        exit 1
+      else
+        probe_status=$?
+        if [ "$probe_status" -ne 1 ]; then
+          exit 1
+        fi
+      fi
+    done
   done
 done
 
@@ -556,10 +785,15 @@ for runner_user in "${runner_users[@]}"; do
   if ! id "$runner_user" >/dev/null 2>&1; then
     continue
   fi
-  if ! sudo_report="$(sudo -n -l -U "$runner_user" 2>&1)"; then
-    printf 'install-llm-proxy-deploy: cannot audit %s sudo rules\n' \
-      "$runner_user" >&2
-    exit 1
+  if sudo_report="$(probe_sudo_policy "$runner_user")"; then
+    :
+  else
+    probe_status=$?
+    if [ "$probe_status" -eq 1 ]; then
+      sudo_report=''
+    else
+      exit 1
+    fi
   fi
   if [ "$runner_user" = ci-runner ] &&
     ! require_runner_cannot_invoke_broker "$runner_user"; then
