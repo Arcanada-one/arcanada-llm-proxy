@@ -50,15 +50,15 @@ def run_broker_sudo_access_check(
         f"{functions}\n"
         "sudo() {\n"
         '  if [ "${MOCK_ALLOWED_ACTION:-}" = "${6:-}" ]; then\n'
-        '    printf "User %s may run the following commands on arcana-prd:\\n" "$4"\n'
-        "    printf '    (root) NOPASSWD: NOSETENV:'\n"
-        '    printf " %s" "${@:5}"\n'
+        '    printf "%s" "$5"\n'
+        '    for sudo_arg in "${@:6}"; do printf " %s" "$sudo_arg"; done\n'
         "    printf '\\n'\n"
         "    return 0\n"
         "  fi\n"
         '  printf "User %s is not allowed to run sudo on arcana-prd.\\n" "$4"\n'
         "  return 1\n"
         "}\n"
+        "hostname() { printf 'arcana-prd\\n'; }\n"
         'require_runner_cannot_invoke_broker "$1" "$2"\n'
     )
     environment = os.environ.copy()
@@ -226,6 +226,9 @@ def run_sudo_command_probe(
     preamble = """sudo() {
   printf '%s' "$MOCK_SUDO_OUTPUT"
   return "$MOCK_SUDO_STATUS"
+}
+hostname() {
+  printf 'arcana-prd\n'
 }"""
     if path is not None:
         extra_env["PATH"] = path
@@ -259,6 +262,9 @@ def run_sudo_policy_probe(
         preamble="""sudo() {
   printf '%s' "$MOCK_SUDO_OUTPUT"
   return "$MOCK_SUDO_STATUS"
+}
+hostname() {
+  printf 'arcana-prd\n'
 }""",
         extra_env={"MOCK_SUDO_STATUS": str(status), "MOCK_SUDO_OUTPUT": output},
     )
@@ -1351,13 +1357,10 @@ def test_dependency_docs_match_the_audited_starlette_pin() -> None:
 
 def test_sudo_command_probe_accepts_only_exact_denial_and_expected_access() -> None:
     denied = "User ci-runner is not allowed to run sudo on arcana-prd."
-    allowed = (
-        "User ci-runner may run the following commands on arcana-prd:\n"
-        "    (root) NOPASSWD: NOSETENV: "
-        "/usr/local/sbin/arcanada-llm-proxy-deploy health sample"
-    )
+    allowed = "/usr/local/sbin/arcanada-llm-proxy-deploy health sample"
 
     assert run_sudo_command_probe(1, denied).returncode == 0
+    assert run_sudo_command_probe(1, "").returncode == 0
     assert run_sudo_command_probe(0, allowed).returncode == 1
 
     unexpected_denial = run_sudo_command_probe(1, "sudo: a password is required")
@@ -1374,8 +1377,7 @@ def test_sudo_command_probe_accepts_only_exact_denial_and_expected_access() -> N
 
     malformed_allowed_output = run_sudo_command_probe(
         0,
-        "User ci-runner may run the following commands on arcana-prd:\n"
-        "    (root) NOPASSWD: /usr/local/sbin/arcanada-llm-proxy-deploy health sample\n"
+        "/usr/local/sbin/arcanada-llm-proxy-deploy health sample\n"
         "unexpected extra output",
     )
     assert malformed_allowed_output.returncode == 2
@@ -1383,6 +1385,11 @@ def test_sudo_command_probe_accepts_only_exact_denial_and_expected_access() -> N
 
     extra_denial_output = run_sudo_command_probe(1, denied + "\nextra")
     assert extra_denial_output.returncode == 2
+
+    wrong_host_denial = run_sudo_command_probe(
+        1, "User ci-runner is not allowed to run sudo on another-host."
+    )
+    assert wrong_host_denial.returncode == 2
 
 
 def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
@@ -1443,6 +1450,16 @@ def test_missing_access_probe_binaries_abort_with_clear_errors(
     no_runuser = run_access_probe_binary_check(str(runuser_path))
     assert no_runuser.returncode == 1
     assert "required access probe command is missing: runuser" in no_runuser.stderr
+
+    sudo_runuser_path = tmp_path / "sudo-runuser-path"
+    sudo_runuser_path.mkdir()
+    for probe_binary in ("sudo", "runuser"):
+        fake_binary = sudo_runuser_path / probe_binary
+        fake_binary.write_text("#!/bin/sh\nexit 0\n")
+        fake_binary.chmod(0o755)
+    no_hostname = run_access_probe_binary_check(str(sudo_runuser_path))
+    assert no_hostname.returncode == 1
+    assert "required access probe command is missing: hostname" in no_hostname.stderr
 
     no_sudo_probe = run_sudo_command_probe(
         1,

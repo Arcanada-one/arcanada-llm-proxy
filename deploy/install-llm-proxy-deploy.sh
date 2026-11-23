@@ -22,7 +22,7 @@ done
 
 require_access_probe_binaries() {
   local probe_binary
-  for probe_binary in sudo runuser; do
+  for probe_binary in sudo runuser hostname; do
     if ! command -v "$probe_binary" >/dev/null 2>&1; then
       printf 'install-llm-proxy-deploy: required access probe command is missing: %s\n' \
         "$probe_binary" >&2
@@ -319,7 +319,12 @@ probe_runuser_access() {
 sudo_denial_output_is_expected() {
   local runner_user="$1"
   local output="$2"
-  [[ "$output" =~ ^User[[:space:]]+${runner_user}[[:space:]]is[[:space:]]not[[:space:]]allowed[[:space:]]to[[:space:]]run[[:space:]]sudo[[:space:]]on[[:space:]][[:alnum:]_.-]+[.]$ ]]
+  local host
+  if ! host="$(hostname 2>/dev/null)" || [ -z "$host" ] || [[ "$host" == *$'\n'* ]]; then
+    printf 'install-llm-proxy-deploy: unable to identify host for sudo denial check\n' >&2
+    return 2
+  fi
+  [ "$output" = "User $runner_user is not allowed to run sudo on $host." ]
 }
 
 sudo_policy_output_is_expected() {
@@ -366,9 +371,11 @@ sudo_policy_output_is_expected() {
 }
 
 probe_sudo_command() {
+  # Command-specific `sudo -l` prints the qualified command on allow and may
+  # return exit 1 with no output when that command is denied.
   local runner_user="$1"
   shift
-  local expected_command="$1 $2"
+  local expected_command="$*"
   local output
   local probe_status
   if ! command -v sudo >/dev/null 2>&1; then
@@ -382,14 +389,14 @@ probe_sudo_command() {
   fi
   case "$probe_status" in
     0)
-      if ! sudo_policy_output_is_expected "$runner_user" "$output" "$expected_command"; then
+      if [ "$output" != "$expected_command" ]; then
         printf 'install-llm-proxy-deploy: sudo access probe returned unexpected output\n' >&2
         return 2
       fi
       return 1
       ;;
     1)
-      if sudo_denial_output_is_expected "$runner_user" "$output"; then
+      if [ -z "$output" ] || sudo_denial_output_is_expected "$runner_user" "$output"; then
         return 0
       fi
       printf 'install-llm-proxy-deploy: sudo access probe returned unexpected denial output\n' >&2
