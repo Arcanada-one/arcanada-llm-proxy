@@ -272,6 +272,7 @@ def run_sudo_policy_probe(
         (
             installer_function("sudo_denial_output_is_expected"),
             installer_function("sudo_policy_output_is_expected"),
+            installer_function("sudo_policy_commands_are_scoped"),
             installer_function("sudo_policy_expected_grant"),
             installer_function("probe_sudo_policy"),
         )
@@ -1487,11 +1488,11 @@ def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
 
 
 def read_sudo_policy_fixture(runner_user: str) -> str:
-    return (ROOT / "tests" / "fixtures" / f"sudo-policy-live-{runner_user}.txt").read_text()
+    return (ROOT / "tests" / "fixtures" / f"sudo-policy-shared-{runner_user}.txt").read_text()
 
 
 @pytest.mark.parametrize("runner_user", ("ci-runner-ci", "ci-runner"))
-def test_sudo_policy_probe_accepts_redacted_live_output_fixtures(runner_user: str) -> None:
+def test_sudo_policy_probe_accepts_synthetic_shared_output(runner_user: str) -> None:
     output = read_sudo_policy_fixture(runner_user)
     accepted = run_sudo_policy_probe(0, output, runner_user)
 
@@ -1528,6 +1529,50 @@ def test_sudo_policy_probe_refuses_llm_proxy_policy_mutants(mutation: str) -> No
     refused = run_sudo_policy_probe(0, output, runner_user)
     assert refused.returncode == 2
     assert "sudo policy probe returned unexpected output" in refused.stderr
+
+
+@pytest.mark.parametrize("runner_user", ("ci-runner", "ci-runner-ci"))
+@pytest.mark.parametrize(
+    "grant",
+    (
+        "(root) NOPASSWD: ALL",
+        "(ALL) NOPASSWD: /usr/local/sbin/*",
+        "(root) NOPASSWD: /usr/local/sbin/",
+        "(root) NOPASSWD: /usr/local/*",
+        "(root) NOPASSWD: /usr/local/sbin/[a-z]*",
+        "(root) NOPASSWD: ^/usr/local/sbin/.*$",
+        "(root) NOPASSWD: sudoedit /etc/example.conf",
+        "(root) NOPASSWD: /bin/sh",
+        "(root) NOPASSWD: /usr/bin/env *",
+        "(root) NOPASSWD: /usr/bin/systemctl *",
+        "(root) NOPASSWD: /usr/local/sbin/example-tenant-deploy status, ALL",
+        "(root) SETENV: NOPASSWD: /usr/local/sbin/example-tenant-deploy status",
+    ),
+)
+def test_sudo_policy_probe_refuses_broad_grants(runner_user: str, grant: str) -> None:
+    original = read_sudo_policy_fixture(runner_user)
+    assert run_sudo_policy_probe(0, original, runner_user).returncode == 0
+    refused = run_sudo_policy_probe(0, f"{original}    {grant}\n", runner_user)
+
+    assert refused.returncode == 2
+    assert "sudo policy probe returned unexpected output" in refused.stderr
+
+
+@pytest.mark.parametrize(
+    "defaults",
+    (
+        'Defaults!ALL env_keep+="EXAMPLE_VAR"',
+        'Defaults!/usr/local/sbin/* env_keep+="EXAMPLE_VAR"',
+        'Defaults>root env_keep+="EXAMPLE_VAR"',
+    ),
+)
+def test_sudo_policy_probe_refuses_defaults_that_can_cover_the_broker(defaults: str) -> None:
+    original = read_sudo_policy_fixture("ci-runner-ci")
+    assert run_sudo_policy_probe(0, original).returncode == 0
+    mutated = original.replace("\n\nUser ", f"\n    {defaults}\n\nUser ", 1)
+
+    assert mutated != original
+    assert run_sudo_policy_probe(0, mutated).returncode == 2
 
 
 @pytest.mark.parametrize(

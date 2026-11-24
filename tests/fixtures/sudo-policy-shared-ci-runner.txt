@@ -1,0 +1,10 @@
+Matching Defaults entries for ci-runner on fixture-host:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+Runas and Command-specific defaults for ci-runner:
+    Defaults!/usr/local/sbin/example-defaults-broker prepare *, /usr/local/sbin/example-defaults-broker status env_keep+="EXAMPLE_VAR_A EXAMPLE_VAR_B EXAMPLE_VAR_C"
+
+User ci-runner may run the following commands on fixture-host:
+    (root) NOPASSWD: /usr/bin/systemctl stop example-tenant.timer, /usr/bin/systemctl start example-tenant.timer
+    (root) NOPASSWD: /usr/local/lib/example-tenant/deploy/example-tenant-install.sh
+    (root) NOPASSWD: /usr/local/sbin/example-tenant-broker

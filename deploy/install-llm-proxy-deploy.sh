@@ -343,6 +343,34 @@ sudo_denial_output_is_expected() {
   [ "$output" = "User $runner_user is not allowed to run sudo on $host." ]
 }
 
+sudo_policy_commands_are_scoped() {
+  local command_list="$1"
+  local broker_path="/usr/local/sbin/$2"
+  local deployment_entrypoint='^/usr/local/(sbin/[[:alnum:]_][[:alnum:]_.-]*-(deploy|broker|bootstrap|compat-proof|login)|lib/[[:alnum:]_][[:alnum:]_.-]*/deploy/[[:alnum:]_][[:alnum:]_.-]*-install\.sh)$'
+  local timer_command='^/usr/bin/systemctl (start|stop) [[:alnum:]_][[:alnum:]_.-]*\.timer$'
+  local -a specs
+  local spec
+  local command_path
+
+  # Short sudo listings separate command specs with commas. Apply the
+  # policy to every spec, including commands after an otherwise valid one.
+  IFS=, read -r -a specs <<<"$command_list"
+  [ "${#specs[@]}" -gt 0 ] || return 1
+  for spec in "${specs[@]}"; do
+    spec="${spec# }"
+    while [[ "$spec" =~ ^([A-Z_]+:[[:blank:]]+) ]]; do
+      [[ "${BASH_REMATCH[1]}" != SETENV:* ]] || return 1
+      spec="${spec#"${BASH_REMATCH[1]}"}"
+    done
+    command_path="${spec%%[[:blank:]]*}"
+    [[ "$command_path" != "$broker_path" &&
+      ! "$command_path" -ef "$broker_path" && ! -d "$command_path" ]] || return 1
+    # Admit literal deployment entrypoints and fixed timer operations.
+    # Other command forms may resolve to the broker or allow arbitrary execution.
+    [[ "$command_path" =~ $deployment_entrypoint || "$spec" =~ $timer_command ]] || return 1
+  done
+}
+
 sudo_policy_output_is_expected() {
   local runner_user="$1"
   local output="$2"
@@ -392,20 +420,19 @@ sudo_policy_output_is_expected() {
         if [ "$saw_user_header" -eq 1 ]; then
           [[ "$line" == '    ('*') '* ]] || return 1
           saw_command_row=1
-          # Shared runners also list grants belonging to other services.
-          [[ "$line" == *"$broker"* ]] || continue
-          [ "$saw_grant" -eq 0 ] && [ "$line" = "$expected_grant" ] || return 1
-          saw_grant=1
+          if [[ "$line" == *"$broker"* ]]; then
+            [ "$saw_grant" -eq 0 ] && [ "$line" = "$expected_grant" ] || return 1
+            saw_grant=1
+          else
+            sudo_policy_commands_are_scoped "${line#*) }" "$broker" || return 1
+          fi
         elif [ "$in_defaults" -eq 1 ]; then
           [ "$saw_matching_defaults_row" -eq 0 ] &&
             [ "$line" = "$expected_matching_defaults" ] || return 1
           saw_matching_defaults_row=1
         elif [ "$in_runas_defaults" -eq 1 ]; then
-          case "$line" in
-            '    Defaults!'?*|'    Defaults>'?*) ;;
-            *) return 1 ;;
-          esac
-          [[ "$line" != *"$broker"* ]] || return 1
+          [[ "$line" == '    Defaults!'?* && "$line" != *"$broker"* ]] || return 1
+          sudo_policy_commands_are_scoped "${line#'    Defaults!'}" "$broker" || return 1
           saw_runas_defaults_row=1
         else
           return 1
