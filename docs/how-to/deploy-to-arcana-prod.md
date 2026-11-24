@@ -8,7 +8,8 @@ by the GitHub `production` environment.
 ## One-time root bootstrap
 
 The dedicated broker runner is `ci-runner-ci`, used by
-`actions.runner.Arcanada-one.arcana-prod-ci.service`. It must not belong to the
+`actions.runner.Arcanada-one.arcana-prd-ci.service`. The installer fails closed
+if this systemd unit is missing or not loaded. It must not belong to the
 Docker group and its live runner processes must not retain Docker socket access.
 The installer checks this account and every process in that runner's cgroup.
 The separate `ci-runner` identity serves unrelated Docker-based fleet deploys;

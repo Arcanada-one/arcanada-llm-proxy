@@ -160,18 +160,33 @@ def run_retained_docker_gid_check(
 
 
 def run_main_pid_check(
-    main_pid: str, *, systemctl_status: int = 0
+    main_pid: str,
+    *,
+    systemctl_status: int = 0,
+    load_state: str = "loaded",
+    load_state_status: int = 0,
 ) -> subprocess.CompletedProcess[str]:
     return run_installer_function(
         "require_runner_main_pid",
-        "actions.runner.Arcanada-one.arcana-prod-ci.service",
+        "actions.runner.Arcanada-one.arcana-prd-ci.service",
+        function_text="\n".join(
+            (
+                installer_function("require_runner_unit_exists"),
+                installer_function("require_runner_main_pid"),
+            )
+        ),
         preamble="""systemctl() {
-  printf '%s\n' "$MOCK_MAIN_PID"
-  return "$MOCK_SYSTEMCTL_STATUS"
+  case "${3:-}" in
+    LoadState) printf '%s\n' "$MOCK_LOAD_STATE"; return "$MOCK_LOAD_STATE_STATUS" ;;
+    MainPID) printf '%s\n' "$MOCK_MAIN_PID"; return "$MOCK_SYSTEMCTL_STATUS" ;;
+    *) return 1 ;;
+  esac
 }""",
         extra_env={
             "MOCK_MAIN_PID": main_pid,
             "MOCK_SYSTEMCTL_STATUS": str(systemctl_status),
+            "MOCK_LOAD_STATE": load_state,
+            "MOCK_LOAD_STATE_STATUS": str(load_state_status),
         },
     )
 
@@ -343,7 +358,7 @@ def run_runner_process_gate(
     pids: str | None,
     cgroup_root: pathlib.Path | None = None,
     control_group: str = (
-        "/system.slice/actions.runner.Arcanada-one.arcana-prod-ci.service"
+        "/system.slice/actions.runner.Arcanada-one.arcana-prd-ci.service"
     ),
     control_group_status: int = 0,
     pgrep_status: int = 0,
@@ -379,6 +394,7 @@ def run_runner_process_gate(
             parser_text or installer_function("process_has_group"),
             installer_function("probe_runuser_access"),
             installer_function("require_runner_account_dockerless"),
+            installer_function("require_runner_unit_exists"),
             installer_function("require_runner_main_pid"),
             installer_function("require_runner_control_group"),
             collector_text
@@ -404,6 +420,7 @@ gpasswd() { return 0; }
 runuser() { return 1; }
 systemctl() {
   case "${3:-}" in
+    LoadState) printf '%s\n' "${MOCK_LOAD_STATE:-loaded}"; return "${MOCK_LOAD_STATE_STATUS:-0}" ;;
     MainPID) printf '%s\n' "$MOCK_MAIN_PID" ;;
     ControlGroup)
       printf '%s\n' "$MOCK_CONTROL_GROUP"
@@ -418,6 +435,8 @@ pgrep() {
 }""",
         extra_env={
             "MOCK_MAIN_PID": main_pid,
+            "MOCK_LOAD_STATE": "loaded",
+            "MOCK_LOAD_STATE_STATUS": "0",
             "MOCK_CONTROL_GROUP": control_group,
             "MOCK_CONTROL_GROUP_STATUS": str(control_group_status),
             "MOCK_PGREP_PIDS": pgrep_pids if pgrep_pids is not None else (pids or ""),
@@ -513,7 +532,7 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
         not in process_gate
     )
     assert (
-        "'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'" in process_gate
+        "'ci-runner-ci:actions.runner.Arcanada-one.arcana-prd-ci.service'" in process_gate
     )
     assert "runner_users=(ci-runner ci-runner-ci)" in text
     assert 'gpasswd --delete "$runner_user" docker' in text
@@ -706,6 +725,16 @@ def test_installer_main_pid_gate_accepts_only_live_positive_decimal_pid() -> Non
     assert live.returncode == 0
     assert live.stdout.strip() == str(os.getpid())
 
+    missing_unit = run_main_pid_check(str(os.getpid()), load_state="not-found")
+    assert missing_unit.returncode == 1
+    assert "runner unit does not exist" in missing_unit.stderr
+
+    unit_lookup_failure = run_main_pid_check(
+        str(os.getpid()), load_state_status=1
+    )
+    assert unit_lookup_failure.returncode == 1
+    assert "runner unit lookup failed" in unit_lookup_failure.stderr
+
     for invalid in ("", "0", "-1", "12x", "12\n13", "999999999"):
         result = run_main_pid_check(invalid)
         assert result.returncode == 1, (invalid, result)
@@ -823,7 +852,7 @@ def test_installer_runner_process_gate_checks_main_pid_and_every_child(
     proc_root = tmp_path / "proc"
     cgroup_root = tmp_path / "cgroup"
     control_group = (
-        "/system.slice/actions.runner.Arcanada-one.arcana-prod-ci.service"
+        "/system.slice/actions.runner.Arcanada-one.arcana-prd-ci.service"
     )
     write_process_status(proc_root, "2001", "1000 1001")
     write_process_status(proc_root, "2002", "1000 1001")
@@ -874,7 +903,7 @@ def test_installer_runner_process_gate_requires_exact_systemd_control_group(
 ) -> None:
     proc_root = tmp_path / "proc"
     write_process_status(proc_root, "2001", "1000 1001")
-    expected = "/system.slice/actions.runner.Arcanada-one.arcana-prod-ci.service"
+    expected = "/system.slice/actions.runner.Arcanada-one.arcana-prd-ci.service"
     clean = run_runner_process_gate(
         proc_root, "988", main_pid="2001", pids="2001\n", control_group=expected
     )
@@ -949,7 +978,7 @@ def test_installer_runner_process_gate_rejects_symlink_or_incomplete_cgroup_tree
     proc_root = tmp_path / "proc"
     write_process_status(proc_root, "2001", "1000 1001")
     control_group = (
-        "/system.slice/actions.runner.Arcanada-one.arcana-prod-ci.service"
+        "/system.slice/actions.runner.Arcanada-one.arcana-prd-ci.service"
     )
 
     real_root = tmp_path / "real-cgroup"
@@ -1064,7 +1093,7 @@ def test_installer_runner_process_gate_rejects_entry_vanishing_after_glob(
     proc_root = tmp_path / "proc"
     cgroup_root = tmp_path / "cgroup"
     control_group = (
-        "/system.slice/actions.runner.Arcanada-one.arcana-prod-ci.service"
+        "/system.slice/actions.runner.Arcanada-one.arcana-prd-ci.service"
     )
     write_process_status(proc_root, "2001", "1000 1001")
     write_cgroup_processes(cgroup_root, control_group, "2001\n")
@@ -1161,7 +1190,7 @@ def test_installer_runner_process_gate_kills_main_child_and_pgrep_bypass_mutants
     proc_root = tmp_path / "proc"
     cgroup_root = tmp_path / "cgroup"
     control_group = (
-        "/system.slice/actions.runner.Arcanada-one.arcana-prod-ci.service"
+        "/system.slice/actions.runner.Arcanada-one.arcana-prd-ci.service"
     )
     write_process_status(proc_root, "2001", "1000 1001")
     write_process_status(proc_root, "2002", "1000 1001")
