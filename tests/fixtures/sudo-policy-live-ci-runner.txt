@@ -1,9 +1,10 @@
-Matching Defaults entries for fixture-ci-runner on fixture-host:
+Matching Defaults entries for ci-runner on fixture-host:
     env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
 
-Runas and Command-specific defaults for fixture-ci-runner:
-    Defaults!/usr/local/sbin/fixture-deploy-broker deploy *, /usr/local/sbin/fixture-deploy-broker status env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"
+Runas and Command-specific defaults for ci-runner:
+    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, /usr/local/sbin/scrutator-deploy-broker status env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B FIXTURE_EVENT_NAME"
 
-User fixture-ci-runner may run the following commands on fixture-host:
+User ci-runner may run the following commands on fixture-host:
     (root) NOPASSWD: /usr/bin/systemctl stop fixture.timer, /usr/bin/systemctl start fixture.timer
-    (root) NOPASSWD: /usr/local/sbin/fixture-compose-broker
+    (root) NOPASSWD: /usr/local/lib/gh-triage/deploy/gh-triage-install.sh
+    (root) NOPASSWD: /usr/local/sbin/arcanada-compose-broker

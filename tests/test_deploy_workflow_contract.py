@@ -272,9 +272,7 @@ def run_sudo_policy_probe(
         (
             installer_function("sudo_denial_output_is_expected"),
             installer_function("sudo_policy_output_is_expected"),
-            installer_function("sudo_policy_expected_matching_defaults"),
-            installer_function("sudo_policy_expected_runas_defaults"),
-            installer_function("sudo_policy_expected_grants"),
+            installer_function("sudo_policy_expected_grant"),
             installer_function("probe_sudo_policy"),
         )
     )
@@ -290,56 +288,6 @@ hostname() {
   printf 'arcana-prd\n'
 }""",
         extra_env={"MOCK_SUDO_STATUS": str(status), "MOCK_SUDO_OUTPUT": output},
-    )
-
-
-def run_sudo_policy_output_check(
-    runner_user: str,
-    output: str,
-    expected_matching_defaults: str,
-    expected_runas_defaults: str,
-    expected_grants: str,
-) -> subprocess.CompletedProcess[str]:
-    function_text = installer_function("sudo_policy_output_is_expected")
-    return run_installer_function(
-        "sudo_policy_output_is_expected",
-        runner_user,
-        output,
-        expected_matching_defaults,
-        expected_runas_defaults,
-        expected_grants,
-        function_text=function_text,
-        preamble='if sudo_policy_output_is_expected "$@"; then exit 0; else exit 2; fi',
-    )
-
-
-def fixture_sudo_policy_allowlist(output: str) -> tuple[str, str, str]:
-    matching_defaults: list[str] = []
-    runas_defaults: list[str] = []
-    grants: list[str] = []
-    in_matching = False
-    in_runas = False
-    in_grants = False
-    for line in output.splitlines():
-        if line.startswith("Runas and Command-specific defaults for "):
-            in_matching = False
-            in_runas, in_grants = True, False
-        elif line.startswith("User ") and " may run the following commands on " in line:
-            in_matching = False
-            in_runas, in_grants = False, True
-        elif line.startswith("Matching Defaults entries for "):
-            in_matching = True
-            in_runas, in_grants = False, False
-        elif in_matching and line:
-            matching_defaults.append(line)
-        elif line.startswith("    Defaults!") and in_runas:
-            runas_defaults.append(line)
-        elif line.startswith("    (root) ") and in_grants:
-            grants.append(line)
-    return (
-        "\n".join(matching_defaults),
-        "\n".join(runas_defaults),
-        "\n".join(grants),
     )
 
 
@@ -1506,9 +1454,9 @@ def test_sudo_command_probe_accepts_only_exact_denial_and_expected_access() -> N
 
 
 def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
-    denied = "User ci-runner-ci is not allowed to run sudo on arcana-prd."
+    denied = "User ci-runner is not allowed to run sudo on arcana-prd."
     allowed_grant = (
-        "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy "
+        "    (root) NOSETENV: NOPASSWD: /usr/local/sbin/arcanada-llm-proxy-deploy "
         "verify-bundle *, /usr/local/sbin/arcanada-llm-proxy-deploy preflight, "
         "/usr/local/sbin/arcanada-llm-proxy-deploy deploy *, "
         "/usr/local/sbin/arcanada-llm-proxy-deploy health *, "
@@ -1525,7 +1473,10 @@ def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
         )
     )
 
-    assert run_sudo_policy_probe(1, denied).returncode == 1
+    assert run_sudo_policy_probe(1, denied, "ci-runner").returncode == 1
+    required_grant_denied = run_sudo_policy_probe(1, denied.replace("ci-runner ", "ci-runner-ci "))
+    assert required_grant_denied.returncode == 2
+    assert "required sudo grant missing" in required_grant_denied.stderr
     accepted = run_sudo_policy_probe(0, allowed)
     assert accepted.returncode == 0
     assert accepted.stdout == allowed + "\n"
@@ -1535,259 +1486,69 @@ def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
     assert run_sudo_policy_probe(0, "unrecognized report").returncode == 2
 
 
-def test_sudo_policy_probe_accepts_three_section_runas_defaults_fixture() -> None:
-    runas_entry = (
-        "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, "
-        "/usr/local/sbin/scrutator-deploy-broker status "
-        'env_keep+="LLM_PROXY_DEPLOY_CAPABILITY"'
-    )
-    output = "\n".join(
-        (
-            "Matching Defaults entries for fixture-ci-runner-ci on fixture-host:",
-            "    env_reset, mail_badpass, secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "",
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:",
-            runas_entry,
-            "",
-            "User fixture-ci-runner-ci may run the following commands on fixture-host:",
-            "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy health",
-        )
-    )
-
-    expected_matching, expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
-    accepted = run_sudo_policy_output_check(
-        "fixture-ci-runner-ci", output, expected_matching, expected_defaults, expected_grants
-    )
-    assert accepted.returncode == 0
-    assert accepted.stdout == ""
-
-    for malformed in (
-        output.replace(
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:\n",
-            "Runas and Command-specific defaults for another-user:\n",
-        ),
-        output.replace(runas_entry, ""),
-        output.replace(runas_entry, "    \t"),
-    ):
-        assert run_sudo_policy_output_check(
-            "fixture-ci-runner-ci",
-            malformed,
-            expected_matching,
-            expected_defaults,
-            expected_grants,
-        ).returncode == 2
+def read_sudo_policy_fixture(runner_user: str) -> str:
+    return (ROOT / "tests" / "fixtures" / f"sudo-policy-live-{runner_user}.txt").read_text()
 
 
-@pytest.mark.parametrize(
-    ("runner_user", "fixture_name"),
-    (
-        ("fixture-ci-runner-ci", "sudo-policy-live-ci-runner-ci.txt"),
-        ("fixture-ci-runner", "sudo-policy-live-ci-runner.txt"),
-    ),
-)
-def test_sudo_policy_probe_accepts_redacted_live_output_fixtures(
-    runner_user: str, fixture_name: str
-) -> None:
-    output = (ROOT / "tests" / "fixtures" / fixture_name).read_text()
+@pytest.mark.parametrize("runner_user", ("ci-runner-ci", "ci-runner"))
+def test_sudo_policy_probe_accepts_redacted_live_output_fixtures(runner_user: str) -> None:
+    output = read_sudo_policy_fixture(runner_user)
     accepted = run_sudo_policy_probe(0, output, runner_user)
 
-    assert accepted.returncode == 0
-    assert accepted.stdout == output.rstrip("\n") + "\n"
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout == output
 
 
 @pytest.mark.parametrize(
-    ("label", "mutate"),
-    (
-        (
-            "!requiretty",
-            lambda text: text.replace("use_pty", "!requiretty, use_pty", 1),
-        ),
-        (
-            "extra env_keep",
-            lambda text: text.replace(
-                "use_pty", 'use_pty, env_keep+="EXTRA_ALLOWED_VAR"', 1
-            ),
-        ),
-        (
-            "comment",
-            lambda text: text.replace(
-                "\n\nRunas and Command-specific defaults for fixture-ci-runner-ci:",
-                "\n    # unexpected sudo default\n\n"
-                "Runas and Command-specific defaults for fixture-ci-runner-ci:",
-                1,
-            ),
-        ),
-        (
-            "continuation line",
-            lambda text: text.replace(
-                "use_pty\n\nRunas and Command-specific defaults for fixture-ci-runner-ci:",
-                'use_pty \\\n      env_keep+="EXTRA_ALLOWED_VAR"\n\n'
-                "Runas and Command-specific defaults for fixture-ci-runner-ci:",
-                1,
-            ),
-        ),
-    ),
+    "mutation",
+    ("duplicate", "widened", "runas-defaults", "missing", "wrong-runner", "matching-defaults"),
 )
-def test_sudo_policy_probe_refuses_unexpected_matching_defaults(label: str, mutate) -> None:
-    output = (ROOT / "tests" / "fixtures" / "sudo-policy-live-ci-runner-ci.txt").read_text()
-    assert run_sudo_policy_probe(0, output, "fixture-ci-runner-ci").returncode == 0
+def test_sudo_policy_probe_refuses_llm_proxy_policy_mutants(mutation: str) -> None:
+    broker = "/usr/local/sbin/arcanada-llm-proxy-deploy"
+    original = read_sudo_policy_fixture("ci-runner-ci")
+    (grant,) = [line for line in original.splitlines() if broker in line]
+    runner_user = "ci-runner-ci"
+    if mutation == "duplicate":
+        output = original + grant + "\n"
+    elif mutation == "widened":
+        output = original.replace(grant, f"    (root) NOSETENV: NOPASSWD: {broker} *", 1)
+    elif mutation == "runas-defaults":
+        output = original.replace("\n\nUser ", f'\n    Defaults!{broker} deploy * env_keep+="EXTRA"\n\nUser ', 1)
+    elif mutation == "missing":
+        output = original.replace(grant + "\n", "", 1)
+    elif mutation == "wrong-runner":
+        runner_user = "ci-runner"
+        original = read_sudo_policy_fixture(runner_user)
+        output = original + grant + "\n"
+    else:
+        output = original.replace("use_pty", "!use_pty", 1)
 
-    mutated = mutate(output)
-    assert mutated != output, label
-    refused = run_sudo_policy_probe(0, mutated, "fixture-ci-runner-ci")
-    assert refused.returncode == 2, label
+    assert output != original
+    assert run_sudo_policy_probe(0, original, runner_user).returncode == 0
+    refused = run_sudo_policy_probe(0, output, runner_user)
+    assert refused.returncode == 2
+    assert "sudo policy probe returned unexpected output" in refused.stderr
 
 
 @pytest.mark.parametrize(
-    ("label", "mutate"),
+    ("expected_text", "replacement"),
     (
-        (
-            "extra /usr/local/sbin Defaults target",
-            lambda text: text.replace(
-                'env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"',
-                'env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B", '
-                "/usr/local/sbin/unexpected-helper status",
-                1,
-            ),
-        ),
-        (
-            "replaced /usr/local/sbin Defaults target",
-            lambda text: text.replace(
-                "/usr/local/sbin/fixture-deploy-broker",
-                "/usr/local/sbin/unexpected-helper",
-            ),
-        ),
-        (
-            "second Runas Defaults target",
-            lambda text: text.replace(
-                'env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"\n',
-                'env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"\n'
-                '    Defaults!/usr/local/sbin/unexpected-helper status env_keep+="EXTRA"\n',
-                1,
-            ),
-        ),
-        (
-            "injected root shell grant",
-            lambda text: text + "\n    (root) NOPASSWD: /bin/sh\n",
-        ),
+        ("Runas and Command-specific defaults for ci-runner-ci:", "Runas and Command-specific defaults for another-user:"),
+        ("    Defaults!", "Defaults!"),
+        ("    (root) NOPASSWD: /usr/bin/systemctl", "(root) NOPASSWD: /usr/bin/systemctl"),
+        ("\n\nUser ", "\nUnexpected unindented section\n\nUser "),
+        ("\n\nUser ", "\n\nRunas and Command-specific defaults for ci-runner-ci:\n\nUser "),
+        ("fixture-host:", "fixture-host: unexpected"),
+        ("use_pty", 'use_pty, env_keep+="EXTRA"'),
+        ("use_pty\n", "use_pty\n    # unexpected sudo default\n"),
     ),
 )
-def test_sudo_policy_probe_refuses_reviewed_policy_mutants(label: str, mutate) -> None:
-    output = (ROOT / "tests" / "fixtures" / "sudo-policy-live-ci-runner-ci.txt").read_text()
-    assert run_sudo_policy_probe(0, output, "fixture-ci-runner-ci").returncode == 0, label
-
-    mutated = mutate(output)
-    assert mutated != output
-    refused = run_sudo_policy_probe(0, mutated, "fixture-ci-runner-ci")
-    assert refused.returncode == 2, label
-
-
-def test_sudo_policy_probe_refuses_malformed_whitespace_env_keep_list() -> None:
-    output = (ROOT / "tests" / "fixtures" / "sudo-policy-live-ci-runner-ci.txt").read_text()
-    malformed = output.replace(
-        'env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"',
-        'env_keep+="FIXTURE_CAPABILITY_A,,FIXTURE_CAPABILITY_B"',
-    )
+def test_sudo_policy_probe_refuses_malformed_reports(expected_text: str, replacement: str) -> None:
+    output = read_sudo_policy_fixture("ci-runner-ci")
+    malformed = output.replace(expected_text, replacement, 1)
     assert malformed != output
-
-    expected_matching, expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
-    refused = run_sudo_policy_output_check(
-        "fixture-ci-runner-ci", malformed, expected_matching, expected_defaults, expected_grants
-    )
-
-    assert refused.returncode == 2
-
-
-@pytest.mark.parametrize(
-    "malformed_entry",
-    (
-        "    unexpected gibberish not a Defaults entry",
-        '    Defaults!relative/path status env_keep+="LLM_PROXY_DEPLOY_CAPABILITY"',
-        '    Defaults!/usr/local/sbin/scrutator-deploy-broker status unknown_option="value"',
-        '    Defaults!/usr/local/sbin/scrutator-deploy-broker status env_keep+="LLM_PROXY_DEPLOY_CAPABILITY" trailing',
-    ),
-)
-def test_sudo_policy_probe_refuses_invalid_runas_defaults_entries(malformed_entry: str) -> None:
-    valid_entry = (
-        "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, "
-        "/usr/local/sbin/scrutator-deploy-broker status "
-        'env_keep+="LLM_PROXY_DEPLOY_CAPABILITY"'
-    )
-    valid_output = "\n".join(
-        (
-            "Matching Defaults entries for fixture-ci-runner-ci on fixture-host:",
-            "    env_reset, mail_badpass",
-            "",
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:",
-            valid_entry,
-            "",
-            "User fixture-ci-runner-ci may run the following commands on fixture-host:",
-            "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy health",
-        )
-    )
-    output = valid_output.replace(valid_entry, malformed_entry, 1)
-    assert malformed_entry != valid_entry
-    expected_matching, expected_defaults, expected_grants = fixture_sudo_policy_allowlist(valid_output)
-    refused = run_sudo_policy_output_check(
-        "fixture-ci-runner-ci", output, expected_matching, expected_defaults, expected_grants
-    )
-    assert refused.returncode == 2
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    (
-        lambda text: text.replace(
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:",
-            "Runas and Command-specific defaults for fixture-ci-runner:",
-        ),
-        lambda text: text.replace(
-            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *",
-            "Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *",
-        ),
-        lambda text: text.replace(
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:\n",
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:\n"
-            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *\n"
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:\n",
-            1,
-        ),
-        lambda text: text.replace(
-            "Matching Defaults entries for fixture-ci-runner-ci on fixture-host:\n",
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:\n"
-            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *\n"
-            "Matching Defaults entries for fixture-ci-runner-ci on fixture-host:\n",
-            1,
-        ),
-        lambda text: text.replace(
-            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *",
-            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *\n"
-            "Unexpected unindented section",
-            1,
-        ),
-    ),
-)
-def test_sudo_policy_probe_refuses_malformed_runas_defaults(mutate) -> None:
-    output = "\n".join(
-        (
-            "Matching Defaults entries for fixture-ci-runner-ci on fixture-host:",
-            "    env_reset, mail_badpass",
-            "",
-            "Runas and Command-specific defaults for fixture-ci-runner-ci:",
-            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *",
-            "",
-            "User fixture-ci-runner-ci may run the following commands on fixture-host:",
-            "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy health",
-        )
-    )
-    malformed = mutate(output)
-    assert malformed != output
-
-    expected_matching, expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
-    refused = run_sudo_policy_output_check(
-        "fixture-ci-runner-ci", malformed, expected_matching, expected_defaults, expected_grants
-    )
-    assert refused.returncode == 2
+    assert run_sudo_policy_probe(0, output).returncode == 0
+    assert run_sudo_policy_probe(0, malformed).returncode == 2
 
 
 def test_runuser_probe_distinguishes_access_denial_from_probe_errors() -> None:
