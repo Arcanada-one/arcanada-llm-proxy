@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import io
 import pathlib
+import subprocess
 
 import pytest
 
@@ -81,6 +82,42 @@ def test_deploy_capability_is_exact_stdin_value_and_constant_time_hash() -> None
         assert capability not in str(error.value)
         if supplied.strip():
             assert supplied.strip() not in str(error.value)
+
+
+def test_bootstrap_capability_hash_matches_workflow_stream(tmp_path: pathlib.Path) -> None:
+    broker = load_broker()
+    capability = "a" * 64
+    capability_file = tmp_path / "deploy-capability"
+    capability_file.write_bytes(f"{capability}\n".encode("ascii"))
+
+    bootstrap = (ROOT / "deploy" / "root-bootstrap.sh").read_text()
+    (hash_assignment,) = (
+        line for line in bootstrap.splitlines() if line.startswith('capability_sha="$(')
+    )
+    # Execute only the bootstrap hash assignment, with its remote shell simulated locally.
+    digest = subprocess.check_output(
+        [
+            "/bin/bash",
+            "-c",
+            'set -euo pipefail\n'
+            'capability_file="$1"\n'
+            'ssh_target=synthetic-host\n'
+            'ssh() { /bin/bash -c "$3"; }\n'
+            f"{hash_assignment}\n"
+            'printf "%s\\n" "$capability_sha"',
+            "bootstrap-hash",
+            str(capability_file),
+        ],
+        text=True,
+    ).strip()
+
+    def workflow_stream(value: str) -> io.StringIO:
+        output = subprocess.check_output(["printf", "%s\n", value], text=True)
+        return io.StringIO(output)
+
+    broker.verify_deploy_capability(workflow_stream(capability), digest)
+    with pytest.raises(broker.DeployError, match="deploy capability rejected"):
+        broker.verify_deploy_capability(workflow_stream("b" * 64), digest)
 
 
 @pytest.mark.parametrize(
