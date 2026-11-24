@@ -7,19 +7,19 @@ by the GitHub `production` environment.
 
 ## One-time root bootstrap
 
-The current and legacy production runner identities are `ci-runner-ci` and
-`ci-runner`. Before installing the service broker, remove both `ci-runner` and
-`ci-runner-ci` from the Docker group. Restart every Actions runner service
-whose process runs as either account, including
-`actions.runner.Arcanada-one.arcana-prod-ci.service`, then verify that neither
-the accounts nor any retained live process can access the Docker socket. The
-installer removes any lingering Docker-group entries, then repeats the
-account, socket, and live-process checks for both identities and fails closed.
+The dedicated broker runner is `ci-runner-ci`, used by
+`actions.runner.Arcanada-one.arcana-prod-ci.service`. It must not belong to the
+Docker group and its live runner processes must not retain Docker socket access.
+The installer checks this account and every process in that runner's cgroup.
+The separate `ci-runner` identity serves unrelated Docker-based fleet deploys;
+keep its existing Docker-group membership. The installer grants the broker
+only to `ci-runner-ci`, checks that `ci-runner` has no sudo rule naming the
+broker, and continues to reject broad passwordless sudo for either identity.
 
 Apply this as part of the global runner migration, before registering or
 dispatching the Dockerless production workflow:
 
-1. stop routing production work to the legacy `ci-runner` identity;
+1. retain the Docker access required by unrelated `ci-runner` deployments;
 2. confirm that no provisioner recreates `/etc/sudoers.d/10-hermes-orch`
    (the Hermes agent that owned it was retired on 2026-10-08, so on a current
    host the file is normally already absent and the installer check passes);
@@ -27,10 +27,11 @@ dispatching the Dockerless production workflow:
    `etc/sudoers.d/10-hermes-orch` member against the live file;
 4. remove the live legacy sudoers file as a host-migration action and validate
    the complete sudo policy;
-5. remove Docker-group membership from both runner identities and restart
-   every retained runner process;
+5. remove Docker-group membership from `ci-runner-ci`, restart its runner
+   service, and verify that its account and every retained process lack Docker
+   socket access; do not remove Docker access from `ci-runner`;
 6. run this installer and require its account, filesystem, socket, process,
-   and effective-sudo checks to pass;
+   capability-state, and effective-sudo checks to pass;
 7. only then enable the `arcana-prod-ci` runner for gated cutovers.
 
 For the SUP-0016 migration, the verified rollback artifact is
@@ -67,7 +68,18 @@ The installer idempotently changes `/opt/arcanada-llm-proxy/code` to a
 root-only deploy tree and makes
 `/opt/arcanada-llm-proxy/code/.env` root-only mode 0600 when those legacy
 paths exist. It verifies that neither runner can read, write, or traverse
-them. The installer never removes or archives this global sudoers file; it
+them. Deployment state is root:root mode 0700 and its capability hash is
+root:root mode 0600; the installer verifies that neither runner can read,
+write, or traverse the state directory or hash file. Because `ci-runner-ci`
+uses `ci-runner` as a supplementary/primary group on the production host,
+review group-readable files under that runner's home and work directories as
+part of host bootstrap. The deployment capability must remain only in the
+protected workflow environment and root-only broker state; never save it in a
+group-readable runner file or workspace. Group membership alone does not grant
+access to the root-only state, but it does grant whatever access file mode bits
+and ACLs grant to group `ci-runner`.
+
+The installer never removes or archives this global sudoers file; it
 fails closed unless the global runner migration has already removed it.
 It installs only the `ci-runner-ci` broker rule and audits the effective sudo
 policy for both identities. Any remaining wildcard service control fails the
@@ -91,9 +103,15 @@ root-owned mode-0600 file
 `/var/lib/arcanada-llm-proxy-deploy/deploy-capability.sha256`.
 
 The root Docker identity must already be able to pull the private
-`ghcr.io/arcanada-one/arcanada-llm-proxy` package. Provision that credential
-through the normal root bootstrap channel; never pass it through workflow
-inputs or command arguments.
+`ghcr.io/arcanada-one/arcanada-llm-proxy` package. Use a GitHub package-reader
+credential with only `read:packages` access to this package, provisioned through
+the root bootstrap channel. Store it in root's Docker credential store (normally
+`/root/.docker/config.json`, root:root mode 0600 under a root:root mode-0700
+`/root/.docker` directory). Supply the token to `docker login` only through
+`--password-stdin`; never pass it through workflow inputs, command arguments,
+the runner environment, or a workspace file. This keeps the existing broker
+design: root pulls the exact digest after validating the CI publication proof;
+the runner never receives Docker socket access or package-pull credentials.
 
 The installer creates:
 

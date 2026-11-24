@@ -5,6 +5,8 @@ import pathlib
 import re
 import subprocess
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 DEPLOY = ROOT / ".github" / "workflows" / "deploy.yml"
@@ -28,6 +30,80 @@ def installer_function(name: str) -> str:
     )
     assert match is not None
     return match.group(0)
+
+
+def run_broker_sudo_access_check(
+    runner_user: str, permitted_action: str = ""
+) -> subprocess.CompletedProcess[str]:
+    functions = "\n".join(
+        installer_function(name)
+        for name in (
+            "sudo_denial_output_is_expected",
+            "sudo_policy_output_is_expected",
+            "probe_sudo_command",
+            "require_sudo_command_denied",
+            "require_runner_cannot_invoke_broker",
+        )
+    )
+    script = (
+        "set -euo pipefail\n"
+        f"{functions}\n"
+        "sudo() {\n"
+        '  if [ "${MOCK_ALLOWED_ACTION:-}" = "${6:-}" ]; then\n'
+        '    printf "%s" "$5"\n'
+        '    for sudo_arg in "${@:6}"; do printf " %s" "$sudo_arg"; done\n'
+        "    printf '\\n'\n"
+        "    return 0\n"
+        "  fi\n"
+        '  printf "User %s is not allowed to run sudo on arcana-prd.\\n" "$4"\n'
+        "  return 1\n"
+        "}\n"
+        "hostname() { printf 'arcana-prd\\n'; }\n"
+        'require_runner_cannot_invoke_broker "$1" "$2"\n'
+    )
+    environment = os.environ.copy()
+    environment["MOCK_ALLOWED_ACTION"] = permitted_action
+    return subprocess.run(
+        ["/bin/bash", "-c", script, "bash", runner_user, ""],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+
+def run_deploy_state_access_check(
+    runner_user: str,
+    state_path: pathlib.Path,
+    capability_path: pathlib.Path,
+    *,
+    accessible_path: pathlib.Path | None = None,
+    accessible_mode: str = "",
+) -> subprocess.CompletedProcess[str]:
+    function_text = "\n".join(
+        installer_function(name)
+        for name in ("probe_runuser_access", "require_runner_cannot_access_deploy_state")
+    )
+    return run_installer_function(
+        "require_runner_cannot_access_deploy_state",
+        runner_user,
+        str(state_path),
+        str(capability_path),
+        function_text=function_text,
+        preamble="""runuser() {
+  if [ "${2:-}" = "$MOCK_RUNNER_USER" ] &&
+    [ "${6:-}" = "$MOCK_ACCESSIBLE_PATH" ] &&
+    [ "${5:-}" = "$MOCK_ACCESSIBLE_MODE" ]; then
+    return 0
+  fi
+  return 1
+}""",
+        extra_env={
+            "MOCK_RUNNER_USER": runner_user,
+            "MOCK_ACCESSIBLE_PATH": str(accessible_path or ""),
+            "MOCK_ACCESSIBLE_MODE": accessible_mode,
+        },
+    )
 
 
 def run_legacy_sudoers_preflight(path: pathlib.Path) -> subprocess.CompletedProcess[str]:
@@ -61,7 +137,7 @@ def run_installer_function(
     environment = os.environ.copy()
     environment.update(extra_env or {})
     return subprocess.run(
-        ["bash", "-c", script, "bash", *args],
+        ["/bin/bash", "-c", script, "bash", *args],
         check=False,
         capture_output=True,
         text=True,
@@ -107,6 +183,10 @@ def run_account_dockerless_check(
     id_status: int = 0,
     function_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    account_check = function_text or installer_function("require_runner_account_dockerless")
+    function_text = "\n".join(
+        (installer_function("probe_runuser_access"), account_check)
+    )
     return run_installer_function(
         "require_runner_account_dockerless",
         "ci-runner-ci",
@@ -126,6 +206,106 @@ runuser() { return "$MOCK_SOCKET_STATUS"; }""",
             "MOCK_ID_STATUS": str(id_status),
             "MOCK_SOCKET_STATUS": "0" if socket_accessible else "1",
         },
+    )
+
+
+def run_sudo_command_probe(
+    status: int,
+    output: str,
+    *,
+    path: str | None = None,
+    command_args: tuple[str, ...] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    function_text = "\n".join(
+        (
+            installer_function("sudo_denial_output_is_expected"),
+            installer_function("sudo_policy_output_is_expected"),
+            installer_function("probe_sudo_command"),
+        )
+    )
+    extra_env = {"MOCK_SUDO_STATUS": str(status), "MOCK_SUDO_OUTPUT": output}
+    preamble = """sudo() {
+  printf '%s' "$MOCK_SUDO_OUTPUT"
+  return "$MOCK_SUDO_STATUS"
+}
+hostname() {
+  printf 'arcana-prd\n'
+}"""
+    if path is not None:
+        extra_env["PATH"] = path
+        preamble = ""
+    if command_args is None:
+        command_args = (
+            "/usr/local/sbin/arcanada-llm-proxy-deploy",
+            "health",
+            "sample",
+        )
+    return run_installer_function(
+        "probe_sudo_command",
+        "ci-runner",
+        *command_args,
+        function_text=function_text,
+        preamble=preamble,
+        extra_env=extra_env,
+    )
+
+
+def run_sudo_policy_probe(
+    status: int, output: str
+) -> subprocess.CompletedProcess[str]:
+    function_text = "\n".join(
+        (
+            installer_function("sudo_denial_output_is_expected"),
+            installer_function("sudo_policy_output_is_expected"),
+            installer_function("probe_sudo_policy"),
+        )
+    )
+    return run_installer_function(
+        "probe_sudo_policy",
+        "ci-runner-ci",
+        function_text=function_text,
+        preamble="""sudo() {
+  printf '%s' "$MOCK_SUDO_OUTPUT"
+  return "$MOCK_SUDO_STATUS"
+}
+hostname() {
+  printf 'arcana-prd\n'
+}""",
+        extra_env={"MOCK_SUDO_STATUS": str(status), "MOCK_SUDO_OUTPUT": output},
+    )
+
+
+def run_runuser_access_probe(
+    status: int,
+    output: str,
+    *,
+    path: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    extra_env = {"MOCK_RUNUSER_STATUS": str(status), "MOCK_RUNUSER_OUTPUT": output}
+    if path is not None:
+        extra_env["PATH"] = path
+        preamble = ""
+    else:
+        preamble = """runuser() {
+  printf '%s' "$MOCK_RUNUSER_OUTPUT"
+  return "$MOCK_RUNUSER_STATUS"
+}"""
+    return run_installer_function(
+        "probe_runuser_access",
+        "ci-runner",
+        "-r",
+        "/protected/path",
+        function_text=installer_function("probe_runuser_access"),
+        preamble=preamble,
+        extra_env=extra_env,
+    )
+
+
+def run_access_probe_binary_check(path: str) -> subprocess.CompletedProcess[str]:
+    return run_installer_function(
+        "require_access_probe_binaries",
+        function_text=installer_function("require_access_probe_binaries"),
+        extra_env={"PATH": path},
     )
 
 
@@ -197,6 +377,7 @@ def run_runner_process_gate(
     functions = "\n".join(
         (
             parser_text or installer_function("process_has_group"),
+            installer_function("probe_runuser_access"),
             installer_function("require_runner_account_dockerless"),
             installer_function("require_runner_main_pid"),
             installer_function("require_runner_control_group"),
@@ -326,18 +507,22 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
 
     assert "ci-runner" in text
     assert "ci-runner-ci" in text
-    assert "'ci-runner:actions.runner.Arcanada-one.arcana-prod.service'" in text
+    process_gate = installer_function("require_runner_processes_dockerless")
     assert (
-        "'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'" in text
+        "'ci-runner:actions.runner.Arcanada-one.arcana-prod.service'"
+        not in process_gate
     )
+    assert (
+        "'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'" in process_gate
+    )
+    assert "runner_users=(ci-runner ci-runner-ci)" in text
     assert 'gpasswd --delete "$runner_user" docker' in text
     assert "legacy_deploy_root=/opt/arcanada-llm-proxy" in text
     assert 'legacy_deploy_tree="$legacy_deploy_root/code"' in text
     assert 'legacy_deploy_env="$legacy_deploy_tree/.env"' in text
     assert 'chmod 0700 "$protected_path"' in text
     assert 'chmod 0600 "$legacy_deploy_env"' in text
-    assert 'runuser -u "$runner_user" -- test -r "$protected_path"' in text
-    assert 'runuser -u "$runner_user" -- test -w "$protected_path"' in text
+    assert 'runuser -u "$runner_user" -- test "$access_mode"' in text
     assert "legacy_sudoers=/etc/sudoers.d/10-hermes-orch" in text
     assert 'require_legacy_sudoers_absent "$legacy_sudoers"' in text
     assert 'sudo -n -l -U "$runner_user"' in text
@@ -354,6 +539,78 @@ def test_installer_enforces_dockerless_prod_ci_runner_and_narrow_sudo() -> None:
     assert "ALL=(ALL) NOPASSWD: ALL" not in text
     assert "ci-runner ALL=(root) NOPASSWD:NOSETENV:" not in text
     assert "ci-runner-ci ALL=(root) NOPASSWD:NOSETENV:" in text
+    assert "can access deployment capability state" in text
+    assert '"$capability_file"' in text
+
+
+def test_installer_checks_shared_group_cannot_reach_capability_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    installer = INSTALLER.read_text()
+    assert "install -d -o root -g root -m 0700" in installer
+    assert "chmod 0600 \"$capability_tmp\"" in installer
+    assert '"$capability_file"' in installer
+
+    state = tmp_path / "deploy-state"
+    state.mkdir(mode=0o700)
+    capability = state / "deploy-capability.sha256"
+    capability.write_text("0" * 64 + "\n")
+    capability.chmod(0o600)
+
+    assert state.stat().st_mode & 0o077 == 0
+    assert capability.stat().st_mode & 0o077 == 0
+    for runner_user in ("ci-runner", "ci-runner-ci"):
+        inaccessible = run_deploy_state_access_check(
+            runner_user, state, capability
+        )
+        assert inaccessible.returncode == 0
+
+
+@pytest.mark.parametrize("runner_user", ("ci-runner", "ci-runner-ci"))
+@pytest.mark.parametrize("path_name", ("state", "capability"))
+@pytest.mark.parametrize("access_mode", ("-r", "-w", "-x"))
+def test_installer_fails_if_runner_can_access_capability_state(
+    tmp_path: pathlib.Path,
+    runner_user: str,
+    path_name: str,
+    access_mode: str,
+) -> None:
+    state = tmp_path / "deploy-state"
+    state.mkdir(mode=0o700)
+    capability = state / "deploy-capability.sha256"
+    capability.write_text("0" * 64 + "\n")
+    capability.chmod(0o600)
+    protected_path = state if path_name == "state" else capability
+
+    accessible = run_deploy_state_access_check(
+        runner_user,
+        state,
+        capability,
+        accessible_path=protected_path,
+        accessible_mode=access_mode,
+    )
+
+    assert accessible.returncode == 1
+    assert "can access deployment capability state" in accessible.stderr
+
+
+@pytest.mark.parametrize(
+    "permitted_action",
+    ("verify-bundle", "preflight", "deploy", "health", "commit", "rollback", "status"),
+)
+def test_installer_rejects_legacy_runner_sudo_path_to_broker(
+    permitted_action: str,
+) -> None:
+    no_broker = run_broker_sudo_access_check("ci-runner")
+    # The effective sudo check catches a command granted by alias or wildcard,
+    # even when the `sudo -l` report does not contain the literal helper path.
+    wildcard_or_alias_grant = run_broker_sudo_access_check(
+        "ci-runner", permitted_action=permitted_action
+    )
+
+    assert no_broker.returncode == 0
+    assert wildcard_or_alias_grant.returncode == 1
+    assert "can invoke the deploy broker through sudo" in wildcard_or_alias_grant.stderr
 
 
 def test_installer_host_awk_detects_retained_docker_gid(
@@ -487,12 +744,18 @@ def test_installer_account_gate_kills_primary_group_and_socket_bypass_mutants() 
     return 1
   fi
 """
-    socket_check = """  if runuser -u "$runner_user" -- test -r /run/docker.sock ||
-    runuser -u "$runner_user" -- test -w /run/docker.sock; then
-    printf 'install-llm-proxy-deploy: %s can still access Docker socket\\n' \\
-      "$runner_user" >&2
-    return 1
-  fi
+    socket_check = """  for access_mode in -r -w; do
+    if probe_runuser_access "$runner_user" "$access_mode" /run/docker.sock; then
+      printf 'install-llm-proxy-deploy: %s can still access Docker socket\\n' \\
+        "$runner_user" >&2
+      return 1
+    else
+      probe_status=$?
+      if [ "$probe_status" -ne 1 ]; then
+        return 2
+      fi
+    fi
+  done
 """
     group_mutant = source.replace(group_check, "")
     socket_mutant = source.replace(socket_check, "")
@@ -1071,7 +1334,12 @@ def test_runbook_exposes_only_the_reviewed_operator_flow() -> None:
     assert "root-only" in text
     assert "LLM_PROXY_DEPLOY_CAPABILITY" in text
     assert "stdin" in text
-    assert re.search(r"both `ci-runner` and\s+`ci-runner-ci`", text)
+    assert "keep its existing Docker-group membership" in text
+    assert "remove Docker-group membership from `ci-runner-ci`" in text
+    assert "do not remove Docker access from `ci-runner`" in text
+    assert "read:packages" in text
+    assert "--password-stdin" in text
+    assert "group-readable files under that runner's home and work directories" in text
     assert "/opt/arcanada-llm-proxy/code/.env" in text
     assert "10-hermes-orch" in text
     assert "global runner migration" in text
@@ -1090,3 +1358,129 @@ def test_dependency_docs_match_the_audited_starlette_pin() -> None:
         text = path.read_text()
         assert "Starlette 1.3.1" in text
         assert "Starlette 1.0.0" not in text
+
+
+def test_sudo_command_probe_accepts_only_exact_denial_and_expected_access() -> None:
+    denied = "User ci-runner is not allowed to run sudo on arcana-prd."
+    allowed = "/usr/local/sbin/arcanada-llm-proxy-deploy health sample"
+
+    assert run_sudo_command_probe(1, denied).returncode == 0
+    assert run_sudo_command_probe(1, "").returncode == 0
+    no_command = run_sudo_command_probe(1, "", command_args=())
+    assert no_command.returncode == 2
+    assert "requires a command" in no_command.stderr
+    assert run_sudo_command_probe(0, allowed).returncode == 1
+
+    unexpected_denial = run_sudo_command_probe(1, "sudo: a password is required")
+    assert unexpected_denial.returncode == 2
+    assert "unexpected denial output" in unexpected_denial.stderr
+
+    unexpected_status = run_sudo_command_probe(2, denied)
+    assert unexpected_status.returncode == 2
+    assert "exited unexpectedly (2)" in unexpected_status.stderr
+
+    unexpected_allowed_output = run_sudo_command_probe(0, "sudo query succeeded")
+    assert unexpected_allowed_output.returncode == 2
+    assert "unexpected output" in unexpected_allowed_output.stderr
+
+    malformed_allowed_output = run_sudo_command_probe(
+        0,
+        "/usr/local/sbin/arcanada-llm-proxy-deploy health sample\n"
+        "unexpected extra output",
+    )
+    assert malformed_allowed_output.returncode == 2
+    assert "unexpected output" in malformed_allowed_output.stderr
+
+    extra_denial_output = run_sudo_command_probe(1, denied + "\nextra")
+    assert extra_denial_output.returncode == 2
+
+    wrong_host_denial = run_sudo_command_probe(
+        1, "User ci-runner is not allowed to run sudo on another-host."
+    )
+    assert wrong_host_denial.returncode == 2
+
+
+def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
+    denied = "User ci-runner-ci is not allowed to run sudo on arcana-prd."
+    allowed = "\n".join(
+        (
+            "Matching Defaults entries for ci-runner-ci on arcana-prd:",
+            "    env_reset, mail_badpass",
+            "User ci-runner-ci may run the following commands on arcana-prd:",
+            "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy health",
+        )
+    )
+
+    assert run_sudo_policy_probe(1, denied).returncode == 1
+    accepted = run_sudo_policy_probe(0, allowed)
+    assert accepted.returncode == 0
+    assert accepted.stdout == allowed + "\n"
+
+    assert run_sudo_policy_probe(1, "sudo: unknown user").returncode == 2
+    assert run_sudo_policy_probe(2, denied).returncode == 2
+    assert run_sudo_policy_probe(0, "unrecognized report").returncode == 2
+
+
+def test_runuser_probe_distinguishes_access_denial_from_probe_errors() -> None:
+    permission_denied = "runuser: failed to execute test: Permission denied"
+
+    assert run_runuser_access_probe(0, "").returncode == 0
+    assert run_runuser_access_probe(1, "").returncode == 1
+    assert run_runuser_access_probe(1, permission_denied).returncode == 1
+
+    unexpected_output = run_runuser_access_probe(1, "runuser: account lookup failed")
+    assert unexpected_output.returncode == 2
+    assert "failed unexpectedly" in unexpected_output.stderr
+
+    unexpected_status = run_runuser_access_probe(2, "")
+    assert unexpected_status.returncode == 2
+    assert "exited unexpectedly (2)" in unexpected_status.stderr
+
+    successful_output = run_runuser_access_probe(0, "unexpected text")
+    assert successful_output.returncode == 2
+    assert "unexpected output" in successful_output.stderr
+
+
+def test_missing_access_probe_binaries_abort_with_clear_errors(
+    tmp_path: pathlib.Path,
+) -> None:
+    missing_sudo = tmp_path / "empty-path"
+    missing_sudo.mkdir()
+    no_sudo = run_access_probe_binary_check(str(missing_sudo))
+    assert no_sudo.returncode == 1
+    assert "required access probe command is missing: sudo" in no_sudo.stderr
+
+    runuser_path = tmp_path / "sudo-only-path"
+    runuser_path.mkdir()
+    fake_sudo = runuser_path / "sudo"
+    fake_sudo.write_text("#!/bin/sh\nexit 0\n")
+    fake_sudo.chmod(0o755)
+    no_runuser = run_access_probe_binary_check(str(runuser_path))
+    assert no_runuser.returncode == 1
+    assert "required access probe command is missing: runuser" in no_runuser.stderr
+
+    sudo_runuser_path = tmp_path / "sudo-runuser-path"
+    sudo_runuser_path.mkdir()
+    for probe_binary in ("sudo", "runuser"):
+        fake_binary = sudo_runuser_path / probe_binary
+        fake_binary.write_text("#!/bin/sh\nexit 0\n")
+        fake_binary.chmod(0o755)
+    no_hostname = run_access_probe_binary_check(str(sudo_runuser_path))
+    assert no_hostname.returncode == 1
+    assert "required access probe command is missing: hostname" in no_hostname.stderr
+
+    no_sudo_probe = run_sudo_command_probe(
+        1,
+        "User ci-runner is not allowed to run sudo on arcana-prd.",
+        path=str(missing_sudo),
+    )
+    assert no_sudo_probe.returncode == 2
+    assert "sudo access probe command is missing" in no_sudo_probe.stderr
+
+    no_runuser_probe = run_runuser_access_probe(
+        1,
+        "",
+        path=str(missing_sudo),
+    )
+    assert no_runuser_probe.returncode == 2
+    assert "runuser access probe command is missing" in no_runuser_probe.stderr
