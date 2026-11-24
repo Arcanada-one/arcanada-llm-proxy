@@ -1450,6 +1450,95 @@ def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
     assert run_sudo_policy_probe(0, "unrecognized report").returncode == 2
 
 
+def test_sudo_policy_probe_accepts_three_section_runas_defaults_fixture() -> None:
+    output = "\n".join(
+        (
+            "Matching Defaults entries for ci-runner-ci on arcana-prd:",
+            "    env_reset, mail_badpass, secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "",
+            "Runas and Command-specific defaults for ci-runner-ci:",
+            '    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, /usr/local/sbin/scrutator-deploy-broker status env_keep+="<redacted-names>"',
+            "",
+            "User ci-runner-ci may run the following commands on arcana-prd:",
+            "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy health",
+        )
+    )
+
+    accepted = run_sudo_policy_probe(0, output)
+    assert accepted.returncode == 0
+    assert accepted.stdout == output + "\n"
+
+    for malformed in (
+        output.replace(
+            "Runas and Command-specific defaults for ci-runner-ci:\n",
+            "Runas and Command-specific defaults for another-user:\n",
+        ),
+        output.replace(
+            '    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, /usr/local/sbin/scrutator-deploy-broker status env_keep+="<redacted-names>"',
+            "",
+        ),
+        output.replace(
+            '    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, /usr/local/sbin/scrutator-deploy-broker status env_keep+="<redacted-names>"',
+            "    \t",
+        ),
+    ):
+        assert run_sudo_policy_probe(0, malformed).returncode == 2
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda text: text.replace(
+            "Runas and Command-specific defaults for ci-runner-ci:",
+            "Runas and Command-specific defaults for ci-runner:",
+        ),
+        lambda text: text.replace(
+            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *",
+            "Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *",
+        ),
+        lambda text: text.replace(
+            "Runas and Command-specific defaults for ci-runner-ci:\n",
+            "Runas and Command-specific defaults for ci-runner-ci:\n"
+            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *\n"
+            "Runas and Command-specific defaults for ci-runner-ci:\n",
+            1,
+        ),
+        lambda text: text.replace(
+            "Matching Defaults entries for ci-runner-ci on arcana-prd:\n",
+            "Runas and Command-specific defaults for ci-runner-ci:\n"
+            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *\n"
+            "Matching Defaults entries for ci-runner-ci on arcana-prd:\n",
+            1,
+        ),
+        lambda text: text.replace(
+            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *",
+            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *\n"
+            "Unexpected unindented section",
+            1,
+        ),
+    ),
+)
+def test_sudo_policy_probe_refuses_malformed_runas_defaults(mutate) -> None:
+    output = "\n".join(
+        (
+            "Matching Defaults entries for ci-runner-ci on arcana-prd:",
+            "    env_reset, mail_badpass",
+            "",
+            "Runas and Command-specific defaults for ci-runner-ci:",
+            "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *",
+            "",
+            "User ci-runner-ci may run the following commands on arcana-prd:",
+            "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy health",
+        )
+    )
+    malformed = mutate(output)
+    assert malformed != output
+
+    refused = run_sudo_policy_probe(0, malformed)
+    assert refused.returncode == 2
+    assert "sudo policy probe returned unexpected output" in refused.stderr
+
+
 def test_runuser_probe_distinguishes_access_denial_from_probe_errors() -> None:
     permission_denied = "runuser: failed to execute test: Permission denied"
 
