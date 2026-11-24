@@ -346,23 +346,35 @@ sudo_denial_output_is_expected() {
 sudo_policy_output_is_expected() {
   local runner_user="$1"
   local output="$2"
-  local expected_command="${3:-}"
+  local expected_runas_defaults="${3:-}"
+  local expected_grants="${4:-}"
   local line
   local saw_user_header=0
   local saw_command=0
   local saw_matching_defaults=0
   local saw_runas_defaults=0
-  local saw_runas_entry=0
   local in_defaults=0
   local in_runas_defaults=0
-  local command_line_pattern='^[[:space:]]+\([^)]*\)[[:space:]].+$'
-  local runas_defaults_entry_pattern='^[[:space:]]+Defaults!/usr/local/sbin/[[:alnum:]][[:alnum:]_.-]*([[:space:]]+[[:alnum:]_./*:+-]+)*(,[[:space:]]*/usr/local/sbin/[[:alnum:]][[:alnum:]_.-]*([[:space:]]+[[:alnum:]_./*:+-]+)*)*[[:space:]]+env_keep\+="[A-Z0-9_]+([[:space:]]+[A-Z0-9_]+|,[[:space:]]*[A-Z0-9_]+)*"$'
+  local -a seen_runas_defaults=()
+  local -a seen_grants=()
+  local expected
+
+  # Compare complete output lines against explicit policy rows. A syntactically
+  # valid sudoers line is not evidence that the installer expects that grant.
+  line_is_listed() {
+    local candidates="$1"
+    local candidate
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      [ "$line" = "$candidate" ] && return 0
+    done <<<"$candidates"
+    return 1
+  }
   while IFS= read -r line; do
     case "$line" in
       "User $runner_user may run the following commands on "*)
         [[ "$line" =~ ^User[[:space:]]+${runner_user}[[:space:]]+may[[:space:]]+run[[:space:]]+the[[:space:]]+following[[:space:]]+commands[[:space:]]+on[[:space:]][[:alnum:]_.-]+:$ ]] || return 1
         [ "$saw_user_header" -eq 0 ] || return 1
-        [ "$saw_runas_defaults" -eq 0 ] || [ "$saw_runas_entry" -eq 1 ] || return 1
         saw_user_header=1
         in_defaults=0
         in_runas_defaults=0
@@ -388,15 +400,12 @@ sudo_policy_output_is_expected() {
         ;;
       *)
         if [ "$saw_user_header" -eq 1 ]; then
-          if [[ "$line" =~ $command_line_pattern ]]; then
-            if [ -z "$expected_command" ] || [[ "$line" == *"$expected_command"* ]]; then
-              saw_command=1
-            fi
-          else
-            return 1
-          fi
-        elif [ "$in_runas_defaults" -eq 1 ] && [[ "$line" =~ $runas_defaults_entry_pattern ]]; then
-          saw_runas_entry=1
+          line_is_listed "$expected_grants" || return 1
+          seen_grants+=("$line")
+          saw_command=1
+        elif [ "$in_runas_defaults" -eq 1 ]; then
+          line_is_listed "$expected_runas_defaults" || return 1
+          seen_runas_defaults+=("$line")
         elif [ "$in_defaults" -eq 1 ] && [[ "$line" == [[:space:]]* ]]; then
           :
         else
@@ -405,8 +414,73 @@ sudo_policy_output_is_expected() {
         ;;
     esac
   done <<<"$output"
-  [ "$saw_runas_defaults" -eq 0 ] || [ "$saw_runas_entry" -eq 1 ] || return 1
-  [ "$saw_user_header" -eq 1 ] && [ "$saw_command" -eq 1 ]
+
+  [ "$saw_user_header" -eq 1 ] || return 1
+  local expected_count=0
+  while IFS= read -r expected; do
+    [ -n "$expected" ] || continue
+    expected_count=$((expected_count + 1))
+    local matches=0
+    local seen
+    for seen in "${seen_runas_defaults[@]}"; do
+      [ "$seen" = "$expected" ] && matches=$((matches + 1))
+    done
+    [ "$matches" -eq 1 ] || return 1
+  done <<<"$expected_runas_defaults"
+  [ "${#seen_runas_defaults[@]}" -eq "$expected_count" ] || return 1
+
+  expected_count=0
+  while IFS= read -r expected; do
+    [ -n "$expected" ] || continue
+    expected_count=$((expected_count + 1))
+    local matches=0
+    local seen
+    for seen in "${seen_grants[@]}"; do
+      [ "$seen" = "$expected" ] && matches=$((matches + 1))
+    done
+    [ "$matches" -eq 1 ] || return 1
+  done <<<"$expected_grants"
+  [ "${#seen_grants[@]}" -eq "$expected_count" ] || return 1
+  [ "$saw_command" -eq "$([ -n "$expected_grants" ] && printf 1 || printf 0)" ]
+}
+
+sudo_policy_expected_runas_defaults() {
+  # The installer writes no Runas Defaults rows. Therefore the production
+  # probe has no Runas Defaults allowlist and refuses any such row. These
+  # synthetic identities are test-only allowlists for the two committed,
+  # redacted captures; they are never in runner_users.
+  [ "$#" -eq 1 ] || return 1
+  case "$1" in
+    fixture-ci-runner-ci|fixture-ci-runner)
+      printf '%s\n' \
+        '    Defaults!/usr/local/sbin/fixture-deploy-broker deploy *, /usr/local/sbin/fixture-deploy-broker status env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"'
+      ;;
+    ci-runner-ci|ci-runner) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+sudo_policy_expected_grants() {
+  case "$1" in
+    fixture-ci-runner-ci)
+      printf '%s\n' \
+        '    (root) NOPASSWD: /usr/bin/systemctl stop fixture.timer, /usr/bin/systemctl start fixture.timer' \
+        '    (root) NOSETENV: NOPASSWD: /usr/local/sbin/fixture-deploy-broker verify-bundle *, /usr/local/sbin/fixture-deploy-broker preflight' \
+        '    (root) NOPASSWD: NOSETENV: /usr/local/sbin/fixture-compose-broker ^backend sync [0-9a-f]{40}$, /usr/local/sbin/fixture-compose-broker ^backend registry-login [0-9a-f]{40}$'
+      ;;
+    fixture-ci-runner)
+      printf '%s\n' \
+        '    (root) NOPASSWD: /usr/bin/systemctl stop fixture.timer, /usr/bin/systemctl start fixture.timer' \
+        '    (root) NOPASSWD: /usr/local/sbin/fixture-compose-broker'
+      ;;
+    ci-runner-ci)
+      # Exact expansion of ARCANADA_LLM_PROXY_DEPLOY written below in this file.
+      printf '%s\n' \
+        '    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy verify-bundle *, /usr/local/sbin/arcanada-llm-proxy-deploy preflight, /usr/local/sbin/arcanada-llm-proxy-deploy deploy *, /usr/local/sbin/arcanada-llm-proxy-deploy health *, /usr/local/sbin/arcanada-llm-proxy-deploy commit *, /usr/local/sbin/arcanada-llm-proxy-deploy rollback *, /usr/local/sbin/arcanada-llm-proxy-deploy status *'
+      ;;
+    ci-runner) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 probe_sudo_command() {
@@ -457,6 +531,10 @@ probe_sudo_policy() {
   local runner_user="$1"
   local output
   local probe_status
+  local expected_defaults
+  local expected_grants
+  expected_defaults="$(sudo_policy_expected_runas_defaults "$runner_user")" || return 2
+  expected_grants="$(sudo_policy_expected_grants "$runner_user")" || return 2
   if ! command -v sudo >/dev/null 2>&1; then
     printf 'install-llm-proxy-deploy: sudo access probe command is missing\n' >&2
     return 2
@@ -468,7 +546,8 @@ probe_sudo_policy() {
   fi
   case "$probe_status" in
     0)
-      if sudo_policy_output_is_expected "$runner_user" "$output"; then
+      if sudo_policy_output_is_expected \
+        "$runner_user" "$output" "$expected_defaults" "$expected_grants"; then
         printf '%s\n' "$output"
         return 0
       fi
