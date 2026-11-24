@@ -1,9 +1,0 @@
-Matching Defaults entries for fixture-ci-runner on fixture-host:
-    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
-
-Runas and Command-specific defaults for fixture-ci-runner:
-    Defaults!/usr/local/sbin/fixture-deploy-broker deploy *, /usr/local/sbin/fixture-deploy-broker status env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"
-
-User fixture-ci-runner may run the following commands on fixture-host:
-    (root) NOPASSWD: /usr/bin/systemctl stop fixture.timer, /usr/bin/systemctl start fixture.timer
-    (root) NOPASSWD: /usr/local/sbin/fixture-compose-broker
