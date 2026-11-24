@@ -272,6 +272,7 @@ def run_sudo_policy_probe(
         (
             installer_function("sudo_denial_output_is_expected"),
             installer_function("sudo_policy_output_is_expected"),
+            installer_function("sudo_policy_expected_matching_defaults"),
             installer_function("sudo_policy_expected_runas_defaults"),
             installer_function("sudo_policy_expected_grants"),
             installer_function("probe_sudo_policy"),
@@ -295,6 +296,7 @@ hostname() {
 def run_sudo_policy_output_check(
     runner_user: str,
     output: str,
+    expected_matching_defaults: str,
     expected_runas_defaults: str,
     expected_grants: str,
 ) -> subprocess.CompletedProcess[str]:
@@ -303,6 +305,7 @@ def run_sudo_policy_output_check(
         "sudo_policy_output_is_expected",
         runner_user,
         output,
+        expected_matching_defaults,
         expected_runas_defaults,
         expected_grants,
         function_text=function_text,
@@ -310,23 +313,34 @@ def run_sudo_policy_output_check(
     )
 
 
-def fixture_sudo_policy_allowlist(output: str) -> tuple[str, str]:
+def fixture_sudo_policy_allowlist(output: str) -> tuple[str, str, str]:
+    matching_defaults: list[str] = []
     runas_defaults: list[str] = []
     grants: list[str] = []
+    in_matching = False
     in_runas = False
     in_grants = False
     for line in output.splitlines():
         if line.startswith("Runas and Command-specific defaults for "):
+            in_matching = False
             in_runas, in_grants = True, False
         elif line.startswith("User ") and " may run the following commands on " in line:
+            in_matching = False
             in_runas, in_grants = False, True
         elif line.startswith("Matching Defaults entries for "):
+            in_matching = True
             in_runas, in_grants = False, False
+        elif in_matching and line:
+            matching_defaults.append(line)
         elif line.startswith("    Defaults!") and in_runas:
             runas_defaults.append(line)
         elif line.startswith("    (root) ") and in_grants:
             grants.append(line)
-    return "\n".join(runas_defaults), "\n".join(grants)
+    return (
+        "\n".join(matching_defaults),
+        "\n".join(runas_defaults),
+        "\n".join(grants),
+    )
 
 
 def run_runuser_access_probe(
@@ -1505,7 +1519,7 @@ def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
     allowed = "\n".join(
         (
             "Matching Defaults entries for ci-runner-ci on arcana-prd:",
-            "    env_reset, mail_badpass",
+            "    env_reset, mail_badpass, secure_path=/usr/local/sbin\\:/usr/local/bin\\:/usr/sbin\\:/usr/bin\\:/sbin\\:/bin\\:/snap/bin, use_pty",
             "User ci-runner-ci may run the following commands on arcana-prd:",
             allowed_grant,
         )
@@ -1540,9 +1554,9 @@ def test_sudo_policy_probe_accepts_three_section_runas_defaults_fixture() -> Non
         )
     )
 
-    expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
+    expected_matching, expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
     accepted = run_sudo_policy_output_check(
-        "fixture-ci-runner-ci", output, expected_defaults, expected_grants
+        "fixture-ci-runner-ci", output, expected_matching, expected_defaults, expected_grants
     )
     assert accepted.returncode == 0
     assert accepted.stdout == ""
@@ -1556,7 +1570,11 @@ def test_sudo_policy_probe_accepts_three_section_runas_defaults_fixture() -> Non
         output.replace(runas_entry, "    \t"),
     ):
         assert run_sudo_policy_output_check(
-            "fixture-ci-runner-ci", malformed, expected_defaults, expected_grants
+            "fixture-ci-runner-ci",
+            malformed,
+            expected_matching,
+            expected_defaults,
+            expected_grants,
         ).returncode == 2
 
 
@@ -1575,6 +1593,49 @@ def test_sudo_policy_probe_accepts_redacted_live_output_fixtures(
 
     assert accepted.returncode == 0
     assert accepted.stdout == output.rstrip("\n") + "\n"
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate"),
+    (
+        (
+            "!requiretty",
+            lambda text: text.replace("use_pty", "!requiretty, use_pty", 1),
+        ),
+        (
+            "extra env_keep",
+            lambda text: text.replace(
+                "use_pty", 'use_pty, env_keep+="EXTRA_ALLOWED_VAR"', 1
+            ),
+        ),
+        (
+            "comment",
+            lambda text: text.replace(
+                "\n\nRunas and Command-specific defaults for fixture-ci-runner-ci:",
+                "\n    # unexpected sudo default\n\n"
+                "Runas and Command-specific defaults for fixture-ci-runner-ci:",
+                1,
+            ),
+        ),
+        (
+            "continuation line",
+            lambda text: text.replace(
+                "use_pty\n\nRunas and Command-specific defaults for fixture-ci-runner-ci:",
+                'use_pty \\\n      env_keep+="EXTRA_ALLOWED_VAR"\n\n'
+                "Runas and Command-specific defaults for fixture-ci-runner-ci:",
+                1,
+            ),
+        ),
+    ),
+)
+def test_sudo_policy_probe_refuses_unexpected_matching_defaults(label: str, mutate) -> None:
+    output = (ROOT / "tests" / "fixtures" / "sudo-policy-live-ci-runner-ci.txt").read_text()
+    assert run_sudo_policy_probe(0, output, "fixture-ci-runner-ci").returncode == 0
+
+    mutated = mutate(output)
+    assert mutated != output, label
+    refused = run_sudo_policy_probe(0, mutated, "fixture-ci-runner-ci")
+    assert refused.returncode == 2, label
 
 
 @pytest.mark.parametrize(
@@ -1629,9 +1690,9 @@ def test_sudo_policy_probe_refuses_malformed_whitespace_env_keep_list() -> None:
     )
     assert malformed != output
 
-    expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
+    expected_matching, expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
     refused = run_sudo_policy_output_check(
-        "fixture-ci-runner-ci", malformed, expected_defaults, expected_grants
+        "fixture-ci-runner-ci", malformed, expected_matching, expected_defaults, expected_grants
     )
 
     assert refused.returncode == 2
@@ -1666,9 +1727,9 @@ def test_sudo_policy_probe_refuses_invalid_runas_defaults_entries(malformed_entr
     )
     output = valid_output.replace(valid_entry, malformed_entry, 1)
     assert malformed_entry != valid_entry
-    expected_defaults, expected_grants = fixture_sudo_policy_allowlist(valid_output)
+    expected_matching, expected_defaults, expected_grants = fixture_sudo_policy_allowlist(valid_output)
     refused = run_sudo_policy_output_check(
-        "fixture-ci-runner-ci", output, expected_defaults, expected_grants
+        "fixture-ci-runner-ci", output, expected_matching, expected_defaults, expected_grants
     )
     assert refused.returncode == 2
 
@@ -1722,9 +1783,9 @@ def test_sudo_policy_probe_refuses_malformed_runas_defaults(mutate) -> None:
     malformed = mutate(output)
     assert malformed != output
 
-    expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
+    expected_matching, expected_defaults, expected_grants = fixture_sudo_policy_allowlist(output)
     refused = run_sudo_policy_output_check(
-        "fixture-ci-runner-ci", malformed, expected_defaults, expected_grants
+        "fixture-ci-runner-ci", malformed, expected_matching, expected_defaults, expected_grants
     )
     assert refused.returncode == 2
 

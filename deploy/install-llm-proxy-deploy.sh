@@ -346,8 +346,9 @@ sudo_denial_output_is_expected() {
 sudo_policy_output_is_expected() {
   local runner_user="$1"
   local output="$2"
-  local expected_runas_defaults="${3:-}"
-  local expected_grants="${4:-}"
+  local expected_matching_defaults="${3:-}"
+  local expected_runas_defaults="${4:-}"
+  local expected_grants="${5:-}"
   local line
   local saw_user_header=0
   local saw_command=0
@@ -355,6 +356,7 @@ sudo_policy_output_is_expected() {
   local saw_runas_defaults=0
   local in_defaults=0
   local in_runas_defaults=0
+  local -a seen_matching_defaults=()
   local -a seen_runas_defaults=()
   local -a seen_grants=()
   local expected
@@ -403,11 +405,12 @@ sudo_policy_output_is_expected() {
           line_is_listed "$expected_grants" || return 1
           seen_grants+=("$line")
           saw_command=1
+        elif [ "$in_defaults" -eq 1 ]; then
+          line_is_listed "$expected_matching_defaults" || return 1
+          seen_matching_defaults+=("$line")
         elif [ "$in_runas_defaults" -eq 1 ]; then
           line_is_listed "$expected_runas_defaults" || return 1
           seen_runas_defaults+=("$line")
-        elif [ "$in_defaults" -eq 1 ] && [[ "$line" == [[:space:]]* ]]; then
-          :
         else
           return 1
         fi
@@ -417,6 +420,19 @@ sudo_policy_output_is_expected() {
 
   [ "$saw_user_header" -eq 1 ] || return 1
   local expected_count=0
+  while IFS= read -r expected; do
+    [ -n "$expected" ] || continue
+    expected_count=$((expected_count + 1))
+    local matches=0
+    local seen
+    for seen in "${seen_matching_defaults[@]}"; do
+      [ "$seen" = "$expected" ] && matches=$((matches + 1))
+    done
+    [ "$matches" -eq 1 ] || return 1
+  done <<<"$expected_matching_defaults"
+  [ "${#seen_matching_defaults[@]}" -eq "$expected_count" ] || return 1
+
+  expected_count=0
   while IFS= read -r expected; do
     [ -n "$expected" ] || continue
     expected_count=$((expected_count + 1))
@@ -456,6 +472,17 @@ sudo_policy_expected_runas_defaults() {
         '    Defaults!/usr/local/sbin/fixture-deploy-broker deploy *, /usr/local/sbin/fixture-deploy-broker status env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"'
       ;;
     ci-runner-ci|ci-runner) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+sudo_policy_expected_matching_defaults() {
+  [ "$#" -eq 1 ] || return 1
+  case "$1" in
+    ci-runner-ci|ci-runner|fixture-ci-runner-ci|fixture-ci-runner)
+      printf '%s\n' \
+        '    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty'
+      ;;
     *) return 1 ;;
   esac
 }
@@ -531,8 +558,10 @@ probe_sudo_policy() {
   local runner_user="$1"
   local output
   local probe_status
+  local expected_matching_defaults
   local expected_defaults
   local expected_grants
+  expected_matching_defaults="$(sudo_policy_expected_matching_defaults "$runner_user")" || return 2
   expected_defaults="$(sudo_policy_expected_runas_defaults "$runner_user")" || return 2
   expected_grants="$(sudo_policy_expected_grants "$runner_user")" || return 2
   if ! command -v sudo >/dev/null 2>&1; then
@@ -547,7 +576,7 @@ probe_sudo_policy() {
   case "$probe_status" in
     0)
       if sudo_policy_output_is_expected \
-        "$runner_user" "$output" "$expected_defaults" "$expected_grants"; then
+        "$runner_user" "$output" "$expected_matching_defaults" "$expected_defaults" "$expected_grants"; then
         printf '%s\n' "$output"
         return 0
       fi
