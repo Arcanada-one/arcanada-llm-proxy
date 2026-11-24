@@ -513,6 +513,29 @@ def test_production_cutover_is_manual_gated_and_dockerless() -> None:
         assert token not in text
 
 
+def test_production_cutover_scopes_and_cleans_ghcr_login() -> None:
+    text = DEPLOY.read_text()
+    cutover = text.split("\n  cutover:\n", 1)[1].split("\n  finalize:\n", 1)[0]
+
+    assert "runs-on: [self-hosted, linux, arcana-prod-ci]" in cutover
+    assert "    permissions:\n      actions: read\n      contents: read\n      packages: read\n" in cutover
+    assert text.count("packages: read") == 1
+    assert "GHCR_LOGIN: /usr/local/sbin/auth-arcana-ghcr-login" in cutover
+
+    login = cutover.split("      - name: Establish GHCR login for this run\n", 1)[1]
+    login, remainder = login.split("      - name: Cut over exact digest\n", 1)
+    assert "GHCR_ACTOR: ${{ github.actor }}" in login
+    assert "GHCR_TOKEN: ${{ github.token }}" in login
+    assert "printf '%s' \"${GHCR_TOKEN}\" |" in login
+    assert 'sudo -n "${GHCR_LOGIN}" login "${GHCR_ACTOR}"' in login
+    assert login.index("GHCR_TOKEN") < login.index('sudo -n "${GHCR_LOGIN}" login')
+
+    logout = remainder.split("      - name: Remove GHCR credentials\n", 1)[1]
+    assert "        if: always()\n" in logout
+    assert 'run: sudo -n "${GHCR_LOGIN}" logout' in logout
+    assert "GHCR_TOKEN" not in logout
+
+
 def test_all_touched_workflow_actions_are_commit_pinned() -> None:
     for path in (CI, DEPLOY):
         refs = action_refs(path.read_text())
