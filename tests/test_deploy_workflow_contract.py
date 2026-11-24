@@ -1474,13 +1474,18 @@ def test_sudo_policy_probe_distinguishes_no_grant_from_probe_errors() -> None:
 
 
 def test_sudo_policy_probe_accepts_three_section_runas_defaults_fixture() -> None:
+    runas_entry = (
+        "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, "
+        "/usr/local/sbin/scrutator-deploy-broker status "
+        'env_keep+="LLM_PROXY_DEPLOY_CAPABILITY"'
+    )
     output = "\n".join(
         (
             "Matching Defaults entries for ci-runner-ci on arcana-prd:",
             "    env_reset, mail_badpass, secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "",
             "Runas and Command-specific defaults for ci-runner-ci:",
-            '    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, /usr/local/sbin/scrutator-deploy-broker status env_keep+="<redacted-names>"',
+            runas_entry,
             "",
             "User ci-runner-ci may run the following commands on arcana-prd:",
             "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy health",
@@ -1496,16 +1501,43 @@ def test_sudo_policy_probe_accepts_three_section_runas_defaults_fixture() -> Non
             "Runas and Command-specific defaults for ci-runner-ci:\n",
             "Runas and Command-specific defaults for another-user:\n",
         ),
-        output.replace(
-            '    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, /usr/local/sbin/scrutator-deploy-broker status env_keep+="<redacted-names>"',
-            "",
-        ),
-        output.replace(
-            '    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, /usr/local/sbin/scrutator-deploy-broker status env_keep+="<redacted-names>"',
-            "    \t",
-        ),
+        output.replace(runas_entry, ""),
+        output.replace(runas_entry, "    \t"),
     ):
         assert run_sudo_policy_probe(0, malformed).returncode == 2
+
+
+@pytest.mark.parametrize(
+    "malformed_entry",
+    (
+        "    unexpected gibberish not a Defaults entry",
+        '    Defaults!relative/path status env_keep+="LLM_PROXY_DEPLOY_CAPABILITY"',
+        '    Defaults!/usr/local/sbin/scrutator-deploy-broker status unknown_option="value"',
+        '    Defaults!/usr/local/sbin/scrutator-deploy-broker status env_keep+="LLM_PROXY_DEPLOY_CAPABILITY" trailing',
+    ),
+)
+def test_sudo_policy_probe_refuses_invalid_runas_defaults_entries(malformed_entry: str) -> None:
+    valid_entry = (
+        "    Defaults!/usr/local/sbin/scrutator-deploy-broker deploy *, "
+        "/usr/local/sbin/scrutator-deploy-broker status "
+        'env_keep+="LLM_PROXY_DEPLOY_CAPABILITY"'
+    )
+    output = "\n".join(
+        (
+            "Matching Defaults entries for ci-runner-ci on arcana-prd:",
+            "    env_reset, mail_badpass",
+            "",
+            "Runas and Command-specific defaults for ci-runner-ci:",
+            malformed_entry,
+            "",
+            "User ci-runner-ci may run the following commands on arcana-prd:",
+            "    (root) NOPASSWD: NOSETENV: /usr/local/sbin/arcanada-llm-proxy-deploy health",
+        )
+    )
+    assert malformed_entry != valid_entry
+    refused = run_sudo_policy_probe(0, output)
+    assert refused.returncode == 2
+    assert "sudo policy probe returned unexpected output" in refused.stderr
 
 
 @pytest.mark.parametrize(
