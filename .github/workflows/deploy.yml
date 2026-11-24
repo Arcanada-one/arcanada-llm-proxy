@@ -75,6 +75,12 @@ jobs:
     environment: production
     runs-on: [self-hosted, linux, arcana-prod-ci]
     timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    env:
+      GHCR_LOGIN: /usr/local/sbin/auth-arcana-ghcr-login
     steps:
       - name: Checkout exact main release
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -101,6 +107,14 @@ jobs:
           sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy verify-bundle \
             "${helper_sha}" "${service_sha}" "${timer_sha}"
           sudo -n /usr/local/sbin/arcanada-llm-proxy-deploy preflight
+      - name: Establish GHCR login for this run
+        env:
+          GHCR_ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" |
+            sudo -n "${GHCR_LOGIN}" login "${GHCR_ACTOR}"
       - name: Cut over exact digest
         env:
           CI_RUN_ID: ${{ inputs.ci_run_id }}
@@ -114,6 +128,9 @@ jobs:
               "${RELEASE_SHA}" \
               "${IMAGE_DIGEST}" \
               "${CI_RUN_ID}"
+      - name: Remove GHCR credentials
+        if: always()
+        run: sudo -n "${GHCR_LOGIN}" logout
 
   finalize:
     if: always()
