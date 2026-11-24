@@ -129,10 +129,26 @@ process_has_group() {
   ' "$status_path"
 }
 
+require_runner_unit_exists() {
+  local runner_unit="$1"
+  local load_state
+  if ! load_state="$(systemctl show --property LoadState --value "$runner_unit")"; then
+    printf 'install-llm-proxy-deploy: runner unit lookup failed\n' >&2
+    return 1
+  fi
+  if [ "$load_state" != loaded ]; then
+    printf 'install-llm-proxy-deploy: runner unit does not exist or is not loaded\n' >&2
+    return 1
+  fi
+}
+
 require_runner_main_pid() {
   local runner_unit="$1"
   local proc_root="${2:-/proc}"
   local runner_pid
+  if ! require_runner_unit_exists "$runner_unit"; then
+    return 1
+  fi
   if ! runner_pid="$(systemctl show --property MainPID --value "$runner_unit")"; then
     printf 'install-llm-proxy-deploy: runner MainPID lookup failed\n' >&2
     return 1
@@ -570,10 +586,10 @@ require_runner_processes_dockerless() {
     return 2
   fi
   retained_group_seen=0
-  # Only arcana-prod-ci can invoke this broker through its sudoers grant.
+  # Only arcana-prd-ci can invoke this broker through its sudoers grant.
   # ci-runner serves unrelated Docker-based deploys and keeps Docker access.
   local -a broker_runners=(
-    'ci-runner-ci:actions.runner.Arcanada-one.arcana-prod-ci.service'
+    'ci-runner-ci:actions.runner.Arcanada-one.arcana-prd-ci.service'
   )
   for runner in "${broker_runners[@]}"; do
     runner_user="${runner%%:*}"
