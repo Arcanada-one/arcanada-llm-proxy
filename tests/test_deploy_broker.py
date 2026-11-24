@@ -84,32 +84,45 @@ def test_deploy_capability_is_exact_stdin_value_and_constant_time_hash() -> None
             assert supplied.strip() not in str(error.value)
 
 
-def test_bootstrap_capability_hash_matches_workflow_stream(tmp_path: pathlib.Path) -> None:
-    broker = load_broker()
-    capability = "a" * 64
-    capability_file = tmp_path / "deploy-capability"
-    capability_file.write_bytes(f"{capability}\n".encode("ascii"))
-
+def run_bootstrap_capability_hash(capability_file: pathlib.Path) -> subprocess.CompletedProcess[str]:
     bootstrap = (ROOT / "deploy" / "root-bootstrap.sh").read_text()
-    (hash_assignment,) = (
-        line for line in bootstrap.splitlines() if line.startswith('capability_sha="$(')
-    )
+    start = bootstrap.index('capability_sha="$(')
+    end = bootstrap.index('\n[[ "$capability_sha"', start)
     # Execute only the bootstrap hash assignment, with its remote shell simulated locally.
-    digest = subprocess.check_output(
+    remote_stdout = capability_file.with_name("remote-stdout")
+    result = subprocess.run(
         [
             "/bin/bash",
             "-c",
             'set -euo pipefail\n'
             'capability_file="$1"\n'
+            'remote_stdout="$2"\n'
             'ssh_target=synthetic-host\n'
-            'ssh() { /bin/bash -c "$3"; }\n'
-            f"{hash_assignment}\n"
+            'ssh() { /bin/bash -c "$3" | tee "$remote_stdout"; }\n'
+            f"{bootstrap[start:end]}\n"
             'printf "%s\\n" "$capability_sha"',
             "bootstrap-hash",
             str(capability_file),
+            str(remote_stdout),
         ],
+        capture_output=True,
         text=True,
-    ).strip()
+        check=False,
+    )
+    assert remote_stdout.read_bytes() == result.stdout.encode()
+    return result
+
+
+def test_bootstrap_capability_hash_matches_workflow_stream(tmp_path: pathlib.Path) -> None:
+    broker = load_broker()
+    capability = "a" * 64
+    capability_file = tmp_path / "deploy capability"
+    capability_file.write_bytes(f"{capability}\n".encode("ascii"))
+
+    result = run_bootstrap_capability_hash(capability_file)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    digest = result.stdout.removesuffix("\n")
 
     def workflow_stream(value: str) -> io.StringIO:
         output = subprocess.check_output(["printf", "%s\n", value], text=True)
@@ -118,6 +131,49 @@ def test_bootstrap_capability_hash_matches_workflow_stream(tmp_path: pathlib.Pat
     broker.verify_deploy_capability(workflow_stream(capability), digest)
     with pytest.raises(broker.DeployError, match="deploy capability rejected"):
         broker.verify_deploy_capability(workflow_stream("b" * 64), digest)
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        b"",
+        b"a" * 62 + b"\n",
+        b"a" * 64,
+        b"a" * 64 + b"\n\n",
+        b"z" * 64 + b"\n",
+        b"A" * 64 + b"\n",
+        b"a" * 64 + b"\0",
+    ],
+    ids=("empty", "63-bytes", "no-newline", "66-bytes", "non-hex", "uppercase", "nul"),
+)
+def test_bootstrap_capability_hash_refuses_malformed_file(
+    tmp_path: pathlib.Path, contents: bytes
+) -> None:
+    capability_file = tmp_path / "deploy-capability"
+    capability_file.write_bytes(contents)
+
+    result = run_bootstrap_capability_hash(capability_file)
+
+    assert result.returncode != 0
+    assert result.stdout == result.stderr == ""
+
+
+@pytest.mark.parametrize("file_type", ("missing", "directory", "symlink"))
+def test_bootstrap_capability_hash_refuses_unsafe_file_type(
+    tmp_path: pathlib.Path, file_type: str
+) -> None:
+    capability_file = tmp_path / "deploy-capability"
+    if file_type == "directory":
+        capability_file.mkdir()
+    elif file_type == "symlink":
+        target = tmp_path / "target"
+        target.write_bytes(b"a" * 64 + b"\n")
+        capability_file.symlink_to(target)
+
+    result = run_bootstrap_capability_hash(capability_file)
+
+    assert result.returncode != 0
+    assert result.stdout == result.stderr == ""
 
 
 @pytest.mark.parametrize(

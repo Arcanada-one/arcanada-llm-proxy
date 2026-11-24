@@ -38,8 +38,13 @@ done
 ssh -T "$ssh_target" "bash -s -- '$remote_state'" \
   < "$repo_root/deploy/root-bootstrap-capability.sh"
 
-# The validated file ends with a newline. The broker hashes only its 64 hex bytes.
-capability_sha="$(ssh -T "$ssh_target" "bash -o pipefail -c 'head -c 64 -- \"\$1\" | sha256sum | cut -d \" \" -f 1' _ '$capability_file'")"
+# Revalidate at the hash step. The broker hashes only the 64 hex bytes.
+capability_sha="$(ssh -T "$ssh_target" "bash -o pipefail -c '
+  [[ -f \"\$1\" && ! -L \"\$1\" && \$(wc -c < \"\$1\") == 65 ]] || exit 1
+  LC_ALL=C grep -aEq \"^[0-9a-f]{64}\$\" -- \"\$1\" || exit 1
+  digest=\$(head -c 64 -- \"\$1\" | sha256sum | cut -d \" \" -f 1) || exit 1
+  printf \"%s\\n\" \"\$digest\"
+' _ '$capability_file' 2>/dev/null")"
 [[ "$capability_sha" =~ ^[0-9a-f]{64}$ ]]
 
 stage="${remote_stage_prefix}-${main_sha}"
