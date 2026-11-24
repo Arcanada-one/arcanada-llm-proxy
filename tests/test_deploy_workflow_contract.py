@@ -266,7 +266,7 @@ hostname() {
 
 
 def run_sudo_policy_probe(
-    status: int, output: str
+    status: int, output: str, runner_user: str = "ci-runner-ci"
 ) -> subprocess.CompletedProcess[str]:
     function_text = "\n".join(
         (
@@ -277,7 +277,7 @@ def run_sudo_policy_probe(
     )
     return run_installer_function(
         "probe_sudo_policy",
-        "ci-runner-ci",
+        runner_user,
         function_text=function_text,
         preamble="""sudo() {
   printf '%s' "$MOCK_SUDO_OUTPUT"
@@ -1505,6 +1505,38 @@ def test_sudo_policy_probe_accepts_three_section_runas_defaults_fixture() -> Non
         output.replace(runas_entry, "    \t"),
     ):
         assert run_sudo_policy_probe(0, malformed).returncode == 2
+
+
+@pytest.mark.parametrize(
+    ("runner_user", "fixture_name"),
+    (
+        ("fixture-ci-runner-ci", "sudo-policy-live-ci-runner-ci.txt"),
+        ("fixture-ci-runner", "sudo-policy-live-ci-runner.txt"),
+    ),
+)
+def test_sudo_policy_probe_accepts_redacted_live_output_fixtures(
+    runner_user: str, fixture_name: str
+) -> None:
+    output = (ROOT / "tests" / "fixtures" / fixture_name).read_text()
+
+    accepted = run_sudo_policy_probe(0, output, runner_user)
+
+    assert accepted.returncode == 0
+    assert accepted.stdout == output.rstrip("\n") + "\n"
+
+
+def test_sudo_policy_probe_refuses_malformed_whitespace_env_keep_list() -> None:
+    output = (ROOT / "tests" / "fixtures" / "sudo-policy-live-ci-runner-ci.txt").read_text()
+    malformed = output.replace(
+        'env_keep+="FIXTURE_CAPABILITY_A FIXTURE_CAPABILITY_B"',
+        'env_keep+="FIXTURE_CAPABILITY_A,,FIXTURE_CAPABILITY_B"',
+    )
+    assert malformed != output
+
+    refused = run_sudo_policy_probe(0, malformed, "fixture-ci-runner-ci")
+
+    assert refused.returncode == 2
+    assert "sudo policy probe returned unexpected output" in refused.stderr
 
 
 @pytest.mark.parametrize(

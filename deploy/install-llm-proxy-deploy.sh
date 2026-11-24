@@ -356,7 +356,7 @@ sudo_policy_output_is_expected() {
   local in_defaults=0
   local in_runas_defaults=0
   local command_line_pattern='^[[:space:]]+\([^)]*\)[[:space:]].+$'
-  local runas_defaults_entry_pattern='^[[:space:]]+Defaults!/usr/local/sbin/[[:alnum:]][[:alnum:]_.-]*([[:space:]]+[[:alnum:]_./*:+-]+)*(,[[:space:]]*/usr/local/sbin/[[:alnum:]][[:alnum:]_.-]*([[:space:]]+[[:alnum:]_./*:+-]+)*)*[[:space:]]+env_keep\+="[A-Z0-9_]+(,[A-Z0-9_]+)*"$'
+  local runas_defaults_entry_pattern='^[[:space:]]+Defaults!/usr/local/sbin/[[:alnum:]][[:alnum:]_.-]*([[:space:]]+[[:alnum:]_./*:+-]+)*(,[[:space:]]*/usr/local/sbin/[[:alnum:]][[:alnum:]_.-]*([[:space:]]+[[:alnum:]_./*:+-]+)*)*[[:space:]]+env_keep\+="[A-Z0-9_]+([[:space:]]+[A-Z0-9_]+|,[[:space:]]*[A-Z0-9_]+)*"$'
   while IFS= read -r line; do
     case "$line" in
       "User $runner_user may run the following commands on "*)
