@@ -350,18 +350,38 @@ sudo_policy_output_is_expected() {
   local line
   local saw_user_header=0
   local saw_command=0
+  local saw_matching_defaults=0
+  local saw_runas_defaults=0
+  local saw_runas_entry=0
   local in_defaults=0
+  local in_runas_defaults=0
   local command_line_pattern='^[[:space:]]+\([^)]*\)[[:space:]].+$'
+  local runas_defaults_entry_pattern='^[[:space:]]+Defaults!/usr/local/sbin/[[:alnum:]][[:alnum:]_.-]*([[:space:]]+[[:alnum:]_./*:+-]+)*(,[[:space:]]*/usr/local/sbin/[[:alnum:]][[:alnum:]_.-]*([[:space:]]+[[:alnum:]_./*:+-]+)*)*[[:space:]]+env_keep\+="[A-Z0-9_]+(,[A-Z0-9_]+)*"$'
   while IFS= read -r line; do
     case "$line" in
       "User $runner_user may run the following commands on "*)
         [[ "$line" =~ ^User[[:space:]]+${runner_user}[[:space:]]+may[[:space:]]+run[[:space:]]+the[[:space:]]+following[[:space:]]+commands[[:space:]]+on[[:space:]][[:alnum:]_.-]+:$ ]] || return 1
+        [ "$saw_user_header" -eq 0 ] || return 1
+        [ "$saw_runas_defaults" -eq 0 ] || [ "$saw_runas_entry" -eq 1 ] || return 1
         saw_user_header=1
         in_defaults=0
+        in_runas_defaults=0
+        ;;
+      "Runas and Command-specific defaults for $runner_user:")
+        [ "$saw_matching_defaults" -eq 1 ] || return 1
+        [ "$saw_runas_defaults" -eq 0 ] || return 1
+        [ "$saw_user_header" -eq 0 ] || return 1
+        saw_runas_defaults=1
+        in_defaults=0
+        in_runas_defaults=1
         ;;
       "Matching Defaults entries for $runner_user on "*)
         [[ "$line" =~ ^Matching[[:space:]]Defaults[[:space:]]entries[[:space:]]for[[:space:]]${runner_user}[[:space:]]on[[:space:]][[:alnum:]_.-]+:$ ]] || return 1
         [ "$in_defaults" -eq 0 ] || return 1
+        [ "$saw_matching_defaults" -eq 0 ] || return 1
+        [ "$saw_runas_defaults" -eq 0 ] || return 1
+        [ "$saw_user_header" -eq 0 ] || return 1
+        saw_matching_defaults=1
         in_defaults=1
         ;;
       '')
@@ -375,6 +395,8 @@ sudo_policy_output_is_expected() {
           else
             return 1
           fi
+        elif [ "$in_runas_defaults" -eq 1 ] && [[ "$line" =~ $runas_defaults_entry_pattern ]]; then
+          saw_runas_entry=1
         elif [ "$in_defaults" -eq 1 ] && [[ "$line" == [[:space:]]* ]]; then
           :
         else
@@ -383,6 +405,7 @@ sudo_policy_output_is_expected() {
         ;;
     esac
   done <<<"$output"
+  [ "$saw_runas_defaults" -eq 0 ] || [ "$saw_runas_entry" -eq 1 ] || return 1
   [ "$saw_user_header" -eq 1 ] && [ "$saw_command" -eq 1 ]
 }
 
