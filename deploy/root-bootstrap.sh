@@ -38,10 +38,12 @@ done
 ssh -T "$ssh_target" "bash -s -- '$remote_state'" \
   < "$repo_root/deploy/root-bootstrap-capability.sh"
 
-# Revalidate at the hash step. The broker hashes only the 64 hex bytes.
+# Check the complete byte layout before hashing the 64 hex bytes.
 capability_sha="$(ssh -T "$ssh_target" "bash -o pipefail -c '
   [[ -f \"\$1\" && ! -L \"\$1\" && \$(wc -c < \"\$1\") == 65 ]] || exit 1
-  LC_ALL=C grep -aEq \"^[0-9a-f]{64}\$\" -- \"\$1\" || exit 1
+  head -c 64 -- \"\$1\" | LC_ALL=C grep -aExq \"[0-9a-f]{64}\" || exit 1
+  last_byte=\$(tail -c 1 -- \"\$1\" | od -An -tx1 | tr -d \"[:space:]\") || exit 1
+  [[ \"\$last_byte\" == 0a ]] || exit 1
   digest=\$(head -c 64 -- \"\$1\" | sha256sum | cut -d \" \" -f 1) || exit 1
   printf \"%s\\n\" \"\$digest\"
 ' _ '$capability_file' 2>/dev/null")"

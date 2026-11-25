@@ -143,8 +143,22 @@ def test_bootstrap_capability_hash_matches_workflow_stream(tmp_path: pathlib.Pat
         b"z" * 64 + b"\n",
         b"A" * 64 + b"\n",
         b"a" * 64 + b"\0",
+        b"\n" + b"a" * 64,
+        b"\n" + b"a" * 64 + b"\n",
+        b"a" * 64 + b"\r",
     ],
-    ids=("empty", "63-bytes", "no-newline", "66-bytes", "non-hex", "uppercase", "nul"),
+    ids=(
+        "empty",
+        "63-bytes",
+        "no-newline",
+        "66-bytes",
+        "non-hex",
+        "uppercase",
+        "nul",
+        "leading-lf",
+        "leading-and-trailing-lf",
+        "trailing-cr",
+    ),
 )
 def test_bootstrap_capability_hash_refuses_malformed_file(
     tmp_path: pathlib.Path, contents: bytes
